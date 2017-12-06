@@ -1,0 +1,7 @@
+[package]
+name = "sexpress"
+version = "0.1.0"
+authors = ["Vurich <jackefransham@gmail.com>"]
+
+[dependencies]
+toolshed = { git = "https://github.com/Vurich/toolshed.git", branch = "set-tools" }

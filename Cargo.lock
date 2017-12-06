@@ -1,0 +1,32 @@
+[[package]]
+name = "byteorder"
+version = "1.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+
+[[package]]
+name = "fxhash"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+dependencies = [
+ "byteorder 1.2.1 (registry+https://github.com/rust-lang/crates.io-index)",
+]
+
+[[package]]
+name = "sexpress"
+version = "0.1.0"
+dependencies = [
+ "toolshed 0.4.0 (git+https://github.com/Vurich/toolshed.git?branch=set-tools)",
+]
+
+[[package]]
+name = "toolshed"
+version = "0.4.0"
+source = "git+https://github.com/Vurich/toolshed.git?branch=set-tools#fb719b9c4ed70f033f477121af820a86c8e9589d"
+dependencies = [
+ "fxhash 0.2.1 (registry+https://github.com/rust-lang/crates.io-index)",
+]
+
+[metadata]
+"checksum byteorder 1.2.1 (registry+https://github.com/rust-lang/crates.io-index)" = "652805b7e73fada9d85e9a6682a4abd490cb52d96aeecc12e33a0de34dfd0d23"
+"checksum fxhash 0.2.1 (registry+https://github.com/rust-lang/crates.io-index)" = "c31b6d751ae2c7f11320402d34e41349dd1016f8d5d45e48c4312bc8625af50c"
+"checksum toolshed 0.4.0 (git+https://github.com/Vurich/toolshed.git?branch=set-tools)" = "<none>"
