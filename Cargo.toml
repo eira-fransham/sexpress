@@ -5,6 +5,7 @@ authors = ["Vurich <jackefransham@gmail.com>"]
 
 [dependencies]
 toolshed = { path = "../toolshed" }
+smallvec = "*"
 
 [dev-dependencies]
 memmap = "*"
