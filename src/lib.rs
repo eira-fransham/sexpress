@@ -5,15 +5,12 @@ extern crate smallvec;
 extern crate toolshed;
 
 use toolshed::Arena;
-use toolshed::map::Map;
 use smallvec::SmallVec;
 
 use std::fmt::{self, Display, Formatter};
 use std::str::FromStr;
 use std::borrow::Cow;
 use std::marker::PhantomData;
-
-type Intern<'arena> = Map<'arena, &'arena str, &'arena str>;
 
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub enum Sexp<'arena, I = i64, F = f64> {
@@ -99,33 +96,23 @@ fn is_identifier_char(c: u8) -> bool {
 
 static NIL: Sexp = Sexp::Nil;
 
-pub fn parse<
-    'sexp,
-    'intern: 'sexp,
-    'mu,
-    I: FromStr,
-    F: FromStr,
-    AP: Into<ArenaPair<'sexp, 'intern>>,
->(
-    arena: AP,
-    intern: &'mu mut Intern<'intern>,
-    input: &'intern [u8],
-) -> Result<Sexp<'sexp>, Cow<'static, str>> {
-    parse_inner(&mut 0, arena, intern, input)
+pub fn parse<'a, I: FromStr, F: FromStr>(
+    arena: &'a Arena,
+    input: &'a [u8],
+) -> Result<Sexp<'a>, Cow<'static, str>> {
+    parse_inner(&mut 0, arena, input)
 }
 
-pub struct ParseManyIterator<'intern: 'sexp, 'sexp: 'mu, 'mu, I, F> {
-    inner: ParseMany<'intern, I, F>,
-    arena: ArenaPair<'sexp, 'intern>,
-    intern: &'mu mut Intern<'intern>,
+pub struct ParseManyIterator<'a, I, F> {
+    inner: ParseMany<'a, I, F>,
+    arena: &'a Arena,
 }
 
-impl<'intern, 'im, 'mu, I: FromStr, F: FromStr> Iterator
-    for ParseManyIterator<'intern, 'im, 'mu, I, F> {
-    type Item = Result<Sexp<'im, I, F>, Cow<'static, str>>;
+impl<'a, I: FromStr, F: FromStr> Iterator for ParseManyIterator<'a, I, F> {
+    type Item = Result<Sexp<'a, I, F>, Cow<'static, str>>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        self.inner.next(self.arena, &mut self.intern)
+        self.inner.next(self.arena)
     }
 }
 
@@ -136,29 +123,23 @@ pub struct ParseMany<'a, I, F> {
     _out_types: PhantomData<(I, F)>,
 }
 
-impl<'intern, I: FromStr, F: FromStr> ParseMany<'intern, I, F> {
-    pub fn into_iter<'sexp, 'mu, AP: Into<ArenaPair<'sexp, 'intern>>>(
-        self,
-        arena: AP,
-        intern: &'mu mut Map<'intern, &'intern str, &'intern str>,
-    ) -> ParseManyIterator<'intern, 'sexp, 'mu, I, F>
+impl<'input, I: FromStr, F: FromStr> ParseMany<'input, I, F> {
+    pub fn into_iter<'a>(self, arena: &'a Arena) -> ParseManyIterator<'a, I, F>
     where
-        'intern: 'sexp,
+        'input: 'a,
     {
         ParseManyIterator {
             inner: self,
-            arena: arena.into(),
-            intern,
+            arena: arena,
         }
     }
 
-    pub fn next<'sexp, 'mu, AP: Into<ArenaPair<'sexp, 'intern>>>(
+    pub fn next<'a>(
         &mut self,
-        arena: AP,
-        intern: &'mu mut Intern<'intern>,
-    ) -> Option<Result<Sexp<'sexp, I, F>, Cow<'static, str>>>
+        arena: &'a Arena,
+    ) -> Option<Result<Sexp<'a, I, F>, Cow<'static, str>>>
     where
-        'intern: 'sexp,
+        'input: 'a,
     {
         while self.counter < self.input.len() && self.input[self.counter].is_ascii_whitespace() {
             self.counter += 1;
@@ -167,7 +148,7 @@ impl<'intern, I: FromStr, F: FromStr> ParseMany<'intern, I, F> {
         if self.err || self.counter >= self.input.len() {
             None
         } else {
-            match parse_inner(&mut self.counter, arena, intern, self.input) {
+            match parse_inner(&mut self.counter, arena, self.input) {
                 Ok(sexp) => Some(Ok(sexp)),
                 Err(err) => {
                     self.err = true;
@@ -203,23 +184,12 @@ pub fn parse_many<I, F>(input: &[u8]) -> ParseMany<I, F> {
     }
 }
 
-fn parse_inner<
-    'sexp,
-    'mu,
-    'intern: 'sexp,
-    I: FromStr,
-    F: FromStr,
-    AP: Into<ArenaPair<'sexp, 'intern>>,
->(
+fn parse_inner<'a, 'mu, I: FromStr, F: FromStr>(
     counter: &'mu mut usize,
-    arenas: AP,
-    intern: &'mu mut Map<'intern, &'intern str, &'intern str>,
-    input: &'intern [u8],
-) -> Result<Sexp<'sexp, I, F>, Cow<'static, str>> {
+    arena: &'a Arena,
+    input: &'a [u8],
+) -> Result<Sexp<'a, I, F>, Cow<'static, str>> {
     use std::str;
-
-    let arenas = arenas.into();
-    let ArenaPair(sexp_arena, intern_arena) = arenas;
 
     macro_rules! is_end_of_token {
         ($counter:expr) => {
@@ -295,32 +265,31 @@ fn parse_inner<
         b'"' => {
             *counter += 1;
             let start = *counter;
-            let mut backslash_locs = SmallVec::<[(usize, Option<u8>); 32]>::new();
+
+            // This is marginally faster than storing them in the same array
+            let mut backslash_locs = SmallVec::<[usize; 32]>::new();
+            let mut newline_locs = SmallVec::<[usize; 32]>::new();
 
             while *counter < input.len() && input[*counter] != b'"' {
                 let cur = input[*counter];
                 if !cur.is_ascii() {
                     return Err("Non-ascii character in string".into());
-                } else if cur.is_ascii_control() && !(cur == b'\n' || cur == b'\r') {
+                } else if cur.is_ascii_control() && cur != b'\n' && cur != b'\r' {
                     return Err("Ascii control character in string".into());
                 } else if cur == b'\\' {
-                    // TODO: Handle this properly
-                    backslash_locs.push((
-                        *counter - start,
-                        if input[*counter + 1] == b'n' {
-                            Some(b'\n')
-                        } else if input[*counter] == b'"' || input[*counter] == b'\\' {
-                            None
-                        } else {
-                            return Err(format!(
-                                "Invalid escape: \\{}",
-                                std::char::from_u32(input[*counter] as _)
-                                    .expect("We check non-ASCII above, Q.E.D.")
-                            ).into());
-                        },
-                    ));
+                    backslash_locs.push(*counter - start);
 
                     *counter += 1;
+
+                    if input[*counter] == b'n' {
+                        newline_locs.push(*counter - start);
+                    } else if input[*counter] != b'"' && input[*counter] != b'\\' {
+                        return Err(format!(
+                            "Invalid escape: \\{}",
+                            std::char::from_u32(input[*counter] as _)
+                                .expect("We check non-ASCII above, Q.E.D.")
+                        ).into());
+                    }
                 }
 
                 *counter += 1;
@@ -333,34 +302,28 @@ fn parse_inner<
             } else {
                 use std::ptr;
 
-                let string = unsafe { str::from_utf8_unchecked(bytes) };
-                if let Some(interned_string) = intern.get(&string[..]) {
-                    interned_string
-                } else {
-                    let mut without_backslashes = intern_arena.alloc_byte_slice_mut(bytes);
+                let mut without_backslashes = arena.alloc_byte_slice_mut(bytes);
 
-                    for &(loc, replace) in backslash_locs.iter().rev() {
-                        unsafe {
-                            ptr::copy(
-                                &without_backslashes[loc + 1],
-                                &mut without_backslashes[loc],
-                                without_backslashes.len() - loc,
-                            );
-                        }
-
-                        if let Some(replace) = replace {
-                            without_backslashes[loc] = replace;
-                        }
-                    }
-
-                    let without_backslashes =
-                        &without_backslashes[..without_backslashes.len() - backslash_locs.len()];
-
-                    let without_backslashes =
-                        unsafe { str::from_utf8_unchecked(without_backslashes) };
-                    intern.insert(intern_arena, string, without_backslashes);
-                    without_backslashes
+                for loc in newline_locs.into_iter() {
+                    without_backslashes[loc] = b'\n';
                 }
+
+                for &loc in backslash_locs.iter().rev() {
+                    unsafe {
+                        ptr::copy(
+                            &without_backslashes[loc + 1],
+                            &mut without_backslashes[loc],
+                            without_backslashes.len() - loc,
+                        );
+                    }
+                }
+
+                let without_backslashes =
+                    &without_backslashes[..without_backslashes.len() - backslash_locs.len()];
+
+                let without_backslashes =
+                    unsafe { str::from_utf8_unchecked(without_backslashes) };
+                without_backslashes
             };
 
             *counter += 1;
@@ -427,17 +390,17 @@ fn parse_inner<
         b'\'' => {
             *counter += 1;
 
-            let next_token = parse_inner(counter, arenas, intern, input)?;
+            let next_token = parse_inner(counter, arena, input)?;
 
-            Ok(Sexp::Quote(sexp_arena.alloc(next_token)))
+            Ok(Sexp::Quote(arena.alloc(next_token)))
         }
         // MetaQuote
         b'`' => {
             *counter += 1;
 
-            let next_token = parse_inner(counter, arenas, intern, input)?;
+            let next_token = parse_inner(counter, arena, input)?;
 
-            Ok(Sexp::Metaquote(sexp_arena.alloc(next_token)))
+            Ok(Sexp::Metaquote(arena.alloc(next_token)))
         }
         // Unquote
         b',' => {
@@ -451,9 +414,9 @@ fn parse_inner<
                 Sexp::Unquote
             };
 
-            let next_token = parse_inner(counter, arenas, intern, input)?;
+            let next_token = parse_inner(counter, arena, input)?;
 
-            Ok(make_sexp(sexp_arena.alloc(next_token)))
+            Ok(make_sexp(arena.alloc(next_token)))
         }
         // Cons
         a @ b'(' | a @ b'[' => {
@@ -478,7 +441,7 @@ fn parse_inner<
                     assert_end_of_token!();
                     skip_whitespace!();
 
-                    last = sexp_arena.alloc(parse_inner(counter, arenas, intern, input)?);
+                    last = arena.alloc(parse_inner(counter, arena, input)?);
 
                     skip_whitespace!();
 
@@ -490,7 +453,7 @@ fn parse_inner<
                     }
                 }
 
-                let current = parse_inner(counter, arenas, intern, input)?;
+                let current = parse_inner(counter, arena, input)?;
                 output.push(current);
 
                 skip_whitespace!();
@@ -499,7 +462,7 @@ fn parse_inner<
             if output.is_empty() {
                 Ok(Sexp::Nil)
             } else {
-                let output = sexp_arena.alloc_many(if output.spilled() {
+                let output = arena.alloc_many(if output.spilled() {
                     Cow::from(output.into_vec())
                 } else {
                     Cow::from(&output[..])
@@ -613,14 +576,12 @@ mod tests {
             "(`(,hello 2 5) `world . `10)",
         ];
         let arena = Arena::new();
-        let mut intern = Default::default();
 
         for case in &cases {
             assert_eq!(
                 &format!(
                     "{}",
-                    parse::<i64, f64, _>(&arena, &mut intern, case.as_bytes())
-                        .expect("Formatting failed")
+                    parse::<i64, f64>(&arena, case.as_bytes()).expect("Formatting failed")
                 ),
                 case
             );
@@ -641,21 +602,18 @@ mod tests {
             .expect("Failed");
         let slice = out.as_ref();
 
-        let intern_arena = Arena::new();
-        let mut intern = Default::default();
-
         b.iter(|| {
             let mut parser = parse_many::<i64, f64>(slice);
-            let sexp_arena = Arena::new();
+            let arena = Arena::new();
 
             loop {
-                if let Some(result) = parser.next((&sexp_arena, &intern_arena), &mut intern) {
+                if let Some(result) = parser.next(&arena) {
                     result.expect("Failed");
                 } else {
                     break;
                 }
 
-                unsafe { sexp_arena.clear() };
+                unsafe { arena.clear() };
             }
         });
     }
@@ -663,7 +621,6 @@ mod tests {
     #[test]
     fn parses_files() {
         let arena = Arena::new();
-        let mut intern = Default::default();
         let files = [
             (
                 &include_bytes!("./filetests/prime-decomposition.lisp")[..],
@@ -672,12 +629,14 @@ mod tests {
             (&include_bytes!("./filetests/combined.lisp")[..], 236),
         ];
 
-        println!("{}", unsafe { ::std::str::from_utf8_unchecked(&files[1].0[88179 - 200..88179 + 200]) });
+        println!("{}", unsafe {
+            ::std::str::from_utf8_unchecked(&files[1].0[88179 - 200..88179 + 200])
+        });
 
         for &(file, expected_len) in &files {
             assert_eq!(
                 parse_many::<i64, f64>(file)
-                    .into_iter(&arena, &mut intern)
+                    .into_iter(&arena)
                     .map(|sexp| sexp.expect("Failed to parse"))
                     .count(),
                 expected_len
@@ -688,12 +647,10 @@ mod tests {
     #[test]
     fn parses_everything() {
         let arena = Arena::new();
-        let mut intern = Default::default();
 
         assert_eq!(
-            parse::<i64, f64, _>(
+            parse::<i64, f64>(
                 &arena,
-                &mut intern,
                 b";; This is a test comment
 ( set!( get-x-ref myStruct ; So is this
                         ) 2 \"test\\\\\" '() '(1 2 3))"
@@ -721,47 +678,45 @@ mod tests {
     #[test]
     fn parses_string() {
         let arena = Arena::new();
-        let mut intern = Default::default();
 
         assert_eq!(
-            parse::<i64, f64, _>(&arena, &mut intern, b"\"Test!\""),
+            parse::<i64, f64>(&arena, b"\"Test!\""),
             Ok(Sexp::String("Test!"))
         );
 
         assert_eq!(
-            parse::<i64, f64, _>(&arena, &mut intern, b"\"(((}{{}{}{}}}}\""),
+            parse::<i64, f64>(&arena, b"\"(((}{{}{}{}}}}\""),
             Ok(Sexp::String("(((}{{}{}{}}}}"))
         );
 
         assert_eq!(
-            parse::<i64, f64, _>(&arena, &mut intern, br#""\\\"\"\\""#),
-            Ok(Sexp::String(r#"\""\"#))
+            parse::<i64, f64>(&arena, br#""\\\"\"\\\n""#),
+            Ok(Sexp::String("\\\"\"\\\n"))
         );
     }
 
     #[test]
     fn parses_ident() {
         let arena = Arena::new();
-        let mut intern = Default::default();
 
         assert_eq!(
-            parse::<i64, f64, _>(&arena, &mut intern, b"testing-a-thing"),
+            parse::<i64, f64>(&arena, b"testing-a-thing"),
             Ok(Sexp::Symbol("testing-a-thing")),
         );
         assert_eq!(
-            parse::<i64, f64, _>(&arena, &mut intern, b"has-number-10"),
+            parse::<i64, f64>(&arena, b"has-number-10"),
             Ok(Sexp::Symbol("has-number-10")),
         );
         assert_eq!(
-            parse::<i64, f64, _>(&arena, &mut intern, b"+1.0+").map_err(|_| ()),
+            parse::<i64, f64>(&arena, b"+1.0+").map_err(|_| ()),
             Ok(Sexp::Symbol("+1.0+")),
         );
         assert_eq!(
-            parse::<i64, f64, _>(&arena, &mut intern, b"+").map_err(|_| ()),
+            parse::<i64, f64>(&arena, b"+").map_err(|_| ()),
             Ok(Sexp::Symbol("+")),
         );
         assert_eq!(
-            parse::<i64, f64, _>(&arena, &mut intern, b"-").map_err(|_| ()),
+            parse::<i64, f64>(&arena, b"-").map_err(|_| ()),
             Ok(Sexp::Symbol("-")),
         );
     }
@@ -769,26 +724,13 @@ mod tests {
     #[test]
     fn parses_numbers() {
         let arena = Arena::new();
-        let mut intern = Default::default();
 
+        assert_eq!(parse::<i64, f64>(&arena, b"2"), Ok(Sexp::Int(2)),);
+        assert_eq!(parse::<i64, f64>(&arena, b"10"), Ok(Sexp::Int(10)),);
+        assert_eq!(parse::<i64, f64>(&arena, b"10."), Ok(Sexp::Float(10.)),);
+        assert_eq!(parse::<i64, f64>(&arena, b"10.5"), Ok(Sexp::Float(10.5)),);
         assert_eq!(
-            parse::<i64, f64, _>(&arena, &mut intern, b"2"),
-            Ok(Sexp::Int(2)),
-        );
-        assert_eq!(
-            parse::<i64, f64, _>(&arena, &mut intern, b"10"),
-            Ok(Sexp::Int(10)),
-        );
-        assert_eq!(
-            parse::<i64, f64, _>(&arena, &mut intern, b"10."),
-            Ok(Sexp::Float(10.)),
-        );
-        assert_eq!(
-            parse::<i64, f64, _>(&arena, &mut intern, b"10.5"),
-            Ok(Sexp::Float(10.5)),
-        );
-        assert_eq!(
-            parse::<i64, f64, _>(&arena, &mut intern, b"10.5.6.7.8").map_err(|_| ()),
+            parse::<i64, f64>(&arena, b"10.5.6.7.8").map_err(|_| ()),
             Err(()),
         );
     }

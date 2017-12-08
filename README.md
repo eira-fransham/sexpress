@@ -11,19 +11,20 @@ use syntax objects or vectors.
 
 Almost everything is done in-place and no allocation is done if possible. All
 elements are stored in an arena so allocation is simply bumping a pointer for
-most cases. Strings and symbols are interned (strings with backslashes are
-interned before escaping so no allocation is done if the backslash'd string is
-already interned) to reduce memory use and allocation frequency. Lists are
-stored as a pair, with the first element being all list elements except the last
-one and the second element being the `cdr` of the innermost cons cell. For
-example, `(1 2 3 4 5)` is equivalent to `(1 . (2 . (3 . (4 . (5 . ())))))`, but
-is stored as `([1, 2, 3, 4, 5], nil)`, and `(1 2 . 3)` is equivalent to `(1 . (2
-. 3))` but is stored as `([1, 2], 3)`. This gives excellent cache efficiency and
-reduces the load on the allocator compared to a linked list. The array is built
-in a `SmallVec` before being copied onto the heap, so lists of a size up to 16
-are built on the stack instead of the heap. Another alternative would be to have
-a single `Vec` that gets reused, which would give better worst-case performance,
-but it's more complexity for unsure gain.
+most cases. Strings and symbols are just references to the input array where
+possible (notably, we must allocate when the array uses backslash escapes,
+although if we took a mutable array as input we could get away with mutating
+in-place). Lists are stored as a pair, with the first element being all list
+elements except the last one and the second element being the `cdr` of the
+innermost cons cell. For example, `(1 2 3 4 5)` is equivalent to `(1 . (2 . (3 .
+(4 . (5 . ())))))`, but is stored as `([1, 2, 3, 4, 5], nil)`, and `(1 2 . 3)`
+is equivalent to `(1 . (2 . 3))` but is stored as `([1, 2], 3)`. This gives
+excellent cache efficiency and reduces the load on the allocator compared to a
+linked list. The array is built in a `SmallVec` before being copied onto the
+heap, so lists of a size up to 16 are built on the stack instead of the heap.
+Another alternative would be to have a single `Vec` that gets reused, which
+would give better worst-case performance, but it's more complexity for unsure
+gain.
 
 The throughput of the parser is approximately 130mb/s when reading from memory,
 the only other s-expression parser that I could find that prided itself on speed
