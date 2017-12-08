@@ -93,7 +93,14 @@ fn is_identifier_char(c: u8) -> bool {
 
 static NIL: Sexp = Sexp::Nil;
 
-pub fn parse<'sexp, 'intern: 'sexp, 'mu, I: FromStr, F: FromStr, AP: Into<ArenaPair<'sexp, 'intern>>>(
+pub fn parse<
+    'sexp,
+    'intern: 'sexp,
+    'mu,
+    I: FromStr,
+    F: FromStr,
+    AP: Into<ArenaPair<'sexp, 'intern>>,
+>(
     arena: AP,
     intern: &'mu mut Intern<'intern>,
     input: &'intern [u8],
@@ -107,7 +114,8 @@ pub struct ParseManyIterator<'intern: 'sexp, 'sexp: 'mu, 'mu, I, F> {
     intern: &'mu mut Intern<'intern>,
 }
 
-impl<'intern, 'im, 'mu, I: FromStr, F: FromStr> Iterator for ParseManyIterator<'intern, 'im, 'mu, I, F> {
+impl<'intern, 'im, 'mu, I: FromStr, F: FromStr> Iterator
+    for ParseManyIterator<'intern, 'im, 'mu, I, F> {
     type Item = Result<Sexp<'im, I, F>, Cow<'static, str>>;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -189,7 +197,14 @@ pub fn parse_many<I, F>(input: &[u8]) -> ParseMany<I, F> {
     }
 }
 
-fn parse_inner<'sexp, 'mu, 'intern: 'sexp, I: FromStr, F: FromStr, AP: Into<ArenaPair<'sexp, 'intern>>>(
+fn parse_inner<
+    'sexp,
+    'mu,
+    'intern: 'sexp,
+    I: FromStr,
+    F: FromStr,
+    AP: Into<ArenaPair<'sexp, 'intern>>,
+>(
     counter: &'mu mut usize,
     arenas: AP,
     intern: &'mu mut Map<'intern, &'intern str, &'intern str>,
@@ -350,19 +365,19 @@ fn parse_inner<'sexp, 'mu, 'intern: 'sexp, I: FromStr, F: FromStr, AP: Into<Aren
                                 ptr::copy(
                                     &without_backslashes[loc + 1],
                                     &mut without_backslashes[loc],
-                                    without_backslashes.len() - loc
+                                    without_backslashes.len() - loc,
                                 );
                             }
                         }
 
-                        let without_backslashes =
-                            &without_backslashes[..without_backslashes.len() - backslash_locs.len()];
+                        let without_backslashes = &without_backslashes
+                            [..without_backslashes.len() - backslash_locs.len()];
 
-                        let without_backslashes = unsafe { str::from_utf8_unchecked(without_backslashes) };
+                        let without_backslashes =
+                            unsafe { str::from_utf8_unchecked(without_backslashes) };
                         intern.insert(intern_arena, string, without_backslashes);
                         without_backslashes
                     }
-
                 };
 
                 *counter += 1;
@@ -493,7 +508,8 @@ mod tests {
             assert_eq!(
                 &format!(
                     "{}",
-                    parse::<i64, f64, _>(&arena, &mut intern, case.as_bytes()).expect("Formatting failed")
+                    parse::<i64, f64, _>(&arena, &mut intern, case.as_bytes())
+                        .expect("Formatting failed")
                 ),
                 case
             );
@@ -634,10 +650,22 @@ mod tests {
         let arena = Arena::new();
         let mut intern = Default::default();
 
-        assert_eq!(parse::<i64, f64, _>(&arena, &mut intern, b"2"), Ok(Sexp::Int(2)),);
-        assert_eq!(parse::<i64, f64, _>(&arena, &mut intern, b"10"), Ok(Sexp::Int(10)),);
-        assert_eq!(parse::<i64, f64, _>(&arena, &mut intern, b"10."), Ok(Sexp::Float(10.)),);
-        assert_eq!(parse::<i64, f64, _>(&arena, &mut intern, b"10.5"), Ok(Sexp::Float(10.5)),);
+        assert_eq!(
+            parse::<i64, f64, _>(&arena, &mut intern, b"2"),
+            Ok(Sexp::Int(2)),
+        );
+        assert_eq!(
+            parse::<i64, f64, _>(&arena, &mut intern, b"10"),
+            Ok(Sexp::Int(10)),
+        );
+        assert_eq!(
+            parse::<i64, f64, _>(&arena, &mut intern, b"10."),
+            Ok(Sexp::Float(10.)),
+        );
+        assert_eq!(
+            parse::<i64, f64, _>(&arena, &mut intern, b"10.5"),
+            Ok(Sexp::Float(10.5)),
+        );
         assert_eq!(
             parse::<i64, f64, _>(&arena, &mut intern, b"10.5.6.7.8").map_err(|_| ()),
             Err(()),
