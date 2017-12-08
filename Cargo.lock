@@ -41,7 +41,7 @@ version = "0.1.0"
 dependencies = [
  "memmap 0.6.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "smallvec 0.6.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "toolshed 0.4.0",
+ "toolshed 0.4.0 (git+https://github.com/Vurich/toolshed.git?branch=set-tools)",
 ]
 
 [[package]]
@@ -52,6 +52,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 [[package]]
 name = "toolshed"
 version = "0.4.0"
+source = "git+https://github.com/Vurich/toolshed.git?branch=set-tools#b2e5f275fd79d041bb156ad8b2b4fe164c3e5b34"
 dependencies = [
  "fxhash 0.2.1 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
@@ -73,5 +74,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 "checksum libc 0.2.34 (registry+https://github.com/rust-lang/crates.io-index)" = "36fbc8a8929c632868295d0178dd8f63fc423fd7537ad0738372bd010b3ac9b0"
 "checksum memmap 0.6.1 (registry+https://github.com/rust-lang/crates.io-index)" = "248000cb22d8164e9b9b74dcdb5bf89a15248d31517287a123367a47f7042460"
 "checksum smallvec 0.6.0 (registry+https://github.com/rust-lang/crates.io-index)" = "44db0ecb22921ef790d17ae13a3f6d15784183ff5f2a01aa32098c7498d2b4b9"
+"checksum toolshed 0.4.0 (git+https://github.com/Vurich/toolshed.git?branch=set-tools)" = "<none>"
 "checksum winapi 0.2.8 (registry+https://github.com/rust-lang/crates.io-index)" = "167dc9d6949a9b857f3451275e911c3f44255842c1f7a76f33c55103a909087a"
 "checksum winapi-build 0.1.1 (registry+https://github.com/rust-lang/crates.io-index)" = "2d315eee3b34aca4797b2da6b13ed88266e6d612562a0c46390af8299fc699bc"

@@ -4,7 +4,7 @@ version = "0.1.0"
 authors = ["Vurich <jackefransham@gmail.com>"]
 
 [dependencies]
-toolshed = { path = "../toolshed" }
+toolshed = { git = "https://github.com/Vurich/toolshed.git", branch = "set-tools" }
 smallvec = "*"
 
 [dev-dependencies]
