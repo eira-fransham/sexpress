@@ -25,4 +25,5 @@ but it's more complexity for unsure gain.
 
 The throughput of the parser is approximately 130mb/s when reading from memory,
 the only other s-expression parser that I could find that prided itself on speed
-and that also had comparable benchmarks reached 4.1mb/s.
+and that also had comparable benchmarks (the also-filthily-named
+[sexpistol](https://github.com/aarongough/sexpistol)) reached 4.1mb/s.
