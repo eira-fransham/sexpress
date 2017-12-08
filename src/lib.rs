@@ -5,15 +5,18 @@ extern crate smallvec;
 extern crate toolshed;
 
 use toolshed::Arena;
-use toolshed::set::Set;
+use toolshed::map::Map;
 use smallvec::SmallVec;
 
 use std::fmt::{self, Display, Formatter};
 use std::str::FromStr;
 use std::borrow::Cow;
+use std::marker::PhantomData;
+
+type Intern<'arena> = Map<'arena, &'arena str, &'arena str>;
 
 #[derive(Copy, Clone, Debug, PartialEq)]
-pub enum Sexp<'arena> {
+pub enum Sexp<'arena, I = i64, F = f64> {
     Quote(&'arena Sexp<'arena>),
     Metaquote(&'arena Sexp<'arena>),
     Unquote(&'arena Sexp<'arena>),
@@ -21,12 +24,12 @@ pub enum Sexp<'arena> {
     List(&'arena [Sexp<'arena>], &'arena Sexp<'arena>),
     String(&'arena str),
     Symbol(&'arena str),
-    Int(i64),
-    Float(f64),
+    Int(I),
+    Float(F),
     Nil,
 }
 
-impl<'a> Display for Sexp<'a> {
+impl<'a, I: Display, F: Display> Display for Sexp<'a, I, F> {
     fn fmt(&self, f: &mut Formatter) -> Result<(), fmt::Error> {
         use Sexp::*;
 
@@ -51,14 +54,14 @@ impl<'a> Display for Sexp<'a> {
             }
             String(val) => write!(f, "{:?}", val),
             Symbol(sym) => write!(f, "{}", sym),
-            Int(n) => write!(f, "{:?}", n),
-            Float(n) => write!(f, "{:?}", n),
+            Int(ref n) => write!(f, "{}", n),
+            Float(ref n) => write!(f, "{}", n),
             Nil => write!(f, "()"),
         }
     }
 }
 
-impl<'a> Sexp<'a> {
+impl<'a, I, F> Sexp<'a, I, F> {
     pub fn len(&self) -> Option<usize> {
         match *self {
             Sexp::List(arr, el) => Some(arr.len() + el.len().unwrap_or(0)),
@@ -90,40 +93,41 @@ fn is_identifier_char(c: u8) -> bool {
 
 static NIL: Sexp = Sexp::Nil;
 
-pub fn parse<'sexp, 'intern: 'sexp, 'mu, AP: Into<ArenaPair<'sexp, 'intern>>>(
+pub fn parse<'sexp, 'intern: 'sexp, 'mu, I: FromStr, F: FromStr, AP: Into<ArenaPair<'sexp, 'intern>>>(
     arena: AP,
-    intern: &'mu mut Set<'intern, &'intern str>,
+    intern: &'mu mut Intern<'intern>,
     input: &'intern [u8],
 ) -> Result<Sexp<'sexp>, Cow<'static, str>> {
     parse_inner(&mut 0, arena, intern, input)
 }
 
-pub struct ParseManyIterator<'intern: 'sexp, 'sexp: 'mu, 'mu> {
-    inner: ParseMany<'intern>,
+pub struct ParseManyIterator<'intern: 'sexp, 'sexp: 'mu, 'mu, I, F> {
+    inner: ParseMany<'intern, I, F>,
     arena: ArenaPair<'sexp, 'intern>,
-    intern: &'mu mut Set<'intern, &'intern str>,
+    intern: &'mu mut Intern<'intern>,
 }
 
-impl<'intern, 'im, 'mu> Iterator for ParseManyIterator<'intern, 'im, 'mu> {
-    type Item = Result<Sexp<'im>, Cow<'static, str>>;
+impl<'intern, 'im, 'mu, I: FromStr, F: FromStr> Iterator for ParseManyIterator<'intern, 'im, 'mu, I, F> {
+    type Item = Result<Sexp<'im, I, F>, Cow<'static, str>>;
 
     fn next(&mut self) -> Option<Self::Item> {
         self.inner.next(self.arena, &mut self.intern)
     }
 }
 
-pub struct ParseMany<'a> {
+pub struct ParseMany<'a, I, F> {
     counter: usize,
     err: bool,
     input: &'a [u8],
+    _out_types: PhantomData<(I, F)>,
 }
 
-impl<'intern> ParseMany<'intern> {
+impl<'intern, I: FromStr, F: FromStr> ParseMany<'intern, I, F> {
     pub fn into_iter<'sexp, 'mu, AP: Into<ArenaPair<'sexp, 'intern>>>(
         self,
         arena: AP,
-        intern: &'mu mut Set<'intern, &'intern str>,
-    ) -> ParseManyIterator<'intern, 'sexp, 'mu>
+        intern: &'mu mut Map<'intern, &'intern str, &'intern str>,
+    ) -> ParseManyIterator<'intern, 'sexp, 'mu, I, F>
     where
         'intern: 'sexp,
     {
@@ -137,8 +141,8 @@ impl<'intern> ParseMany<'intern> {
     pub fn next<'sexp, 'mu, AP: Into<ArenaPair<'sexp, 'intern>>>(
         &mut self,
         arena: AP,
-        intern: &'mu mut Set<'intern, &'intern str>,
-    ) -> Option<Result<Sexp<'sexp>, Cow<'static, str>>>
+        intern: &'mu mut Intern<'intern>,
+    ) -> Option<Result<Sexp<'sexp, I, F>, Cow<'static, str>>>
     where
         'intern: 'sexp,
     {
@@ -176,20 +180,21 @@ impl<'a, 'b> From<(&'a Arena, &'b Arena)> for ArenaPair<'a, 'b> {
     }
 }
 
-pub fn parse_many(input: &[u8]) -> ParseMany {
+pub fn parse_many<I, F>(input: &[u8]) -> ParseMany<I, F> {
     ParseMany {
         counter: 0,
         err: false,
+        _out_types: PhantomData,
         input,
     }
 }
 
-fn parse_inner<'sexp, 'mu, 'intern: 'sexp, AP: Into<ArenaPair<'sexp, 'intern>>>(
+fn parse_inner<'sexp, 'mu, 'intern: 'sexp, I: FromStr, F: FromStr, AP: Into<ArenaPair<'sexp, 'intern>>>(
     counter: &'mu mut usize,
     arenas: AP,
-    intern: &'mu mut Set<'intern, &'intern str>,
+    intern: &'mu mut Map<'intern, &'intern str, &'intern str>,
     input: &'intern [u8],
-) -> Result<Sexp<'sexp>, Cow<'static, str>> {
+) -> Result<Sexp<'sexp, I, F>, Cow<'static, str>> {
     use std::str;
 
     let arenas = arenas.into();
@@ -324,30 +329,40 @@ fn parse_inner<'sexp, 'mu, 'intern: 'sexp, AP: Into<ArenaPair<'sexp, 'intern>>>(
 
                 let string = if backslash_locs.is_empty() {
                     let string = unsafe { str::from_utf8_unchecked(bytes) };
-                    if let Some(&interned_string) = intern.get(Cow::from(string)) {
+                    if let Some(interned_string) = intern.get(string) {
                         interned_string
                     } else {
                         let string = intern_arena.alloc_str(&string);
-                        // TODO: Make own `interner` hashset reimplementation
-                        intern.insert(intern_arena, string);
+                        intern.insert(intern_arena, string, string);
                         string
                     }
                 } else {
-                    let mut without_backslashes = bytes.to_vec();
+                    use std::ptr;
 
-                    for loc in backslash_locs.into_iter().rev() {
-                        without_backslashes.remove(loc);
-                    }
-
-                    let string = unsafe { String::from_utf8_unchecked(without_backslashes) };
-                    if let Some(&interned_string) = intern.get(Cow::from(&string[..])) {
+                    let string = unsafe { str::from_utf8_unchecked(bytes) };
+                    if let Some(interned_string) = intern.get(&string[..]) {
                         interned_string
                     } else {
-                        let string = intern_arena.alloc_string(string);
-                        // TODO: Make own `interner` hashset reimplementation
-                        intern.insert(intern_arena, string);
-                        string
+                        let mut without_backslashes = intern_arena.alloc_byte_slice_mut(bytes);
+
+                        for &loc in backslash_locs.iter().rev() {
+                            unsafe {
+                                ptr::copy(
+                                    &without_backslashes[loc + 1],
+                                    &mut without_backslashes[loc],
+                                    without_backslashes.len() - loc
+                                );
+                            }
+                        }
+
+                        let without_backslashes =
+                            &without_backslashes[..without_backslashes.len() - backslash_locs.len()];
+
+                        let without_backslashes = unsafe { str::from_utf8_unchecked(without_backslashes) };
+                        intern.insert(intern_arena, string, without_backslashes);
+                        without_backslashes
                     }
+
                 };
 
                 *counter += 1;
@@ -377,11 +392,11 @@ fn parse_inner<'sexp, 'mu, 'intern: 'sexp, AP: Into<ArenaPair<'sexp, 'intern>>>(
                 // We only advance if the bytes are in `.0123456789` so we know that it is valid
                 // UTF8
                 return if is_float {
-                    f64::from_str(string)
+                    FromStr::from_str(string)
                         .map(Sexp::Float)
                         .map_err(|_| format!("Invalid float: {:?}", string).into())
                 } else {
-                    i64::from_str(string)
+                    FromStr::from_str(string)
                         .map(Sexp::Int)
                         .map_err(|_| format!("Invalid int: {:?}", string).into())
                 };
@@ -422,11 +437,10 @@ fn parse_inner<'sexp, 'mu, 'intern: 'sexp, AP: Into<ArenaPair<'sexp, 'intern>>>(
                 assert_end_of_token!();
 
                 let string = unsafe { str::from_utf8_unchecked(&input[start..*counter]) };
-                let string = if let Some(&interned_string) = intern.get(string) {
+                let string = if let Some(interned_string) = intern.get(string) {
                     interned_string
                 } else {
-                    // TODO: Make own `interner` hashset reimplementation
-                    intern.insert(intern_arena, string);
+                    intern.insert(intern_arena, string, string);
                     string
                 };
 
@@ -479,7 +493,7 @@ mod tests {
             assert_eq!(
                 &format!(
                     "{}",
-                    parse(&arena, &mut intern, case.as_bytes()).expect("Formatting failed")
+                    parse::<i64, f64, _>(&arena, &mut intern, case.as_bytes()).expect("Formatting failed")
                 ),
                 case
             );
@@ -505,7 +519,7 @@ mod tests {
         let sexp_arena = Arena::new();
 
         b.iter(|| {
-            let mut parser = parse_many(slice);
+            let mut parser = parse_many::<i64, f64>(slice);
 
             loop {
                 if let Some(result) = parser.next((&sexp_arena, &intern_arena), &mut intern) {
@@ -533,7 +547,7 @@ mod tests {
 
         for &(file, expected_len) in &files {
             assert_eq!(
-                parse_many(file)
+                parse_many::<i64, f64>(file)
                     .into_iter(&arena, &mut intern)
                     .map(|sexp| sexp.expect("Failed to parse"))
                     .count(),
@@ -548,7 +562,7 @@ mod tests {
         let mut intern = Default::default();
 
         assert_eq!(
-            parse(
+            parse::<i64, f64, _>(
                 &arena,
                 &mut intern,
                 b";; This is a test comment
@@ -581,17 +595,17 @@ mod tests {
         let mut intern = Default::default();
 
         assert_eq!(
-            parse(&arena, &mut intern, b"\"Test!\""),
+            parse::<i64, f64, _>(&arena, &mut intern, b"\"Test!\""),
             Ok(Sexp::String("Test!"))
         );
 
         assert_eq!(
-            parse(&arena, &mut intern, b"\"(((}{{}{}{}}}}\""),
+            parse::<i64, f64, _>(&arena, &mut intern, b"\"(((}{{}{}{}}}}\""),
             Ok(Sexp::String("(((}{{}{}{}}}}"))
         );
 
         assert_eq!(
-            parse(&arena, &mut intern, br#""\\\"\"\\""#),
+            parse::<i64, f64, _>(&arena, &mut intern, br#""\\\"\"\\""#),
             Ok(Sexp::String(r#"\""\"#))
         );
     }
@@ -602,15 +616,15 @@ mod tests {
         let mut intern = Default::default();
 
         assert_eq!(
-            parse(&arena, &mut intern, b"testing-a-thing"),
+            parse::<i64, f64, _>(&arena, &mut intern, b"testing-a-thing"),
             Ok(Sexp::Symbol("testing-a-thing")),
         );
         assert_eq!(
-            parse(&arena, &mut intern, b"has-number-10"),
+            parse::<i64, f64, _>(&arena, &mut intern, b"has-number-10"),
             Ok(Sexp::Symbol("has-number-10")),
         );
         assert_eq!(
-            parse(&arena, &mut intern, b"10-fails").map_err(|_| ()),
+            parse::<i64, f64, _>(&arena, &mut intern, b"10-fails").map_err(|_| ()),
             Err(()),
         );
     }
@@ -620,12 +634,12 @@ mod tests {
         let arena = Arena::new();
         let mut intern = Default::default();
 
-        assert_eq!(parse(&arena, &mut intern, b"2"), Ok(Sexp::Int(2)),);
-        assert_eq!(parse(&arena, &mut intern, b"10"), Ok(Sexp::Int(10)),);
-        assert_eq!(parse(&arena, &mut intern, b"10."), Ok(Sexp::Float(10.)),);
-        assert_eq!(parse(&arena, &mut intern, b"10.5"), Ok(Sexp::Float(10.5)),);
+        assert_eq!(parse::<i64, f64, _>(&arena, &mut intern, b"2"), Ok(Sexp::Int(2)),);
+        assert_eq!(parse::<i64, f64, _>(&arena, &mut intern, b"10"), Ok(Sexp::Int(10)),);
+        assert_eq!(parse::<i64, f64, _>(&arena, &mut intern, b"10."), Ok(Sexp::Float(10.)),);
+        assert_eq!(parse::<i64, f64, _>(&arena, &mut intern, b"10.5"), Ok(Sexp::Float(10.5)),);
         assert_eq!(
-            parse(&arena, &mut intern, b"10.5.6.7.8").map_err(|_| ()),
+            parse::<i64, f64, _>(&arena, &mut intern, b"10.5.6.7.8").map_err(|_| ()),
             Err(()),
         );
     }
