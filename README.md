@@ -2,10 +2,12 @@
 
 Seductively fast s-expression parser.
 
-A basic parser for s-expressions that can handle quotes, metaquotes/unquote,
-strings, atoms and numbers (64-bit by default but you can plug in bignums if you
-like). It doesn't currently handle complex escape sequences, it only allows
-escaping double quotes and backslashes and fails on anything else.
+A basic parser for s-expressions that can handle quotes, metaquotes/unquote/
+unquote-splicing, strings, atoms, chars and numbers (64-bit by default but you
+can plug in bignums if you like). It doesn't currently handle complex escape
+sequences, it only allows escaping double quotes, backslashes and newlines and
+fails on anything else. In general it should parse any scheme code that doesn't
+use syntax objects or vectors.
 
 Almost everything is done in-place and no allocation is done if possible. All
 elements are stored in an arena so allocation is simply bumping a pointer for

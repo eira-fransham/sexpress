@@ -20,8 +20,11 @@ pub enum Sexp<'arena, I = i64, F = f64> {
     Quote(&'arena Sexp<'arena>),
     Metaquote(&'arena Sexp<'arena>),
     Unquote(&'arena Sexp<'arena>),
+    UnquoteSplicing(&'arena Sexp<'arena>),
     // The last element is usally nil
     List(&'arena [Sexp<'arena>], &'arena Sexp<'arena>),
+    Bool(bool),
+    Char(char),
     String(&'arena str),
     Symbol(&'arena str),
     Int(I),
@@ -37,6 +40,7 @@ impl<'a, I: Display, F: Display> Display for Sexp<'a, I, F> {
             Quote(el) => write!(f, "'{}", el),
             Metaquote(el) => write!(f, "`{}", el),
             Unquote(el) => write!(f, ",{}", el),
+            UnquoteSplicing(el) => write!(f, ",{}", el),
             List(xs, last) => {
                 write!(f, "(")?;
                 if let Some((first, rest)) = xs.split_first() {
@@ -52,6 +56,8 @@ impl<'a, I: Display, F: Display> Display for Sexp<'a, I, F> {
 
                 write!(f, ")")
             }
+            Bool(b) => write!(f, r"#{}", if b { 't' } else { 'f' }),
+            Char(c) => write!(f, r"#\{}", c),
             String(val) => write!(f, "{:?}", val),
             Symbol(sym) => write!(f, "{}", sym),
             Int(ref n) => write!(f, "{}", n),
@@ -78,9 +84,8 @@ fn between_inclusive(a: u8, b: u8, c: u8) -> bool {
 fn is_identifier_start_char(c: u8) -> bool {
     between_inclusive(c, b'a', b'z') ||
         // We start at < to get <=>?@
-        between_inclusive(c, b'<', b'Z') || between_inclusive(c, b'#', b'&') || c == b'-'
-        || c == b'/' || c == b'+' || c == b'*' || c == b'~' || c == b'_' || c == b'^'
-        || c == b':' || c == b'!'
+        between_inclusive(c, b'<', b'Z') || between_inclusive(c, b'$', b'&') || c == b'/'
+        || c == b'*' || c == b'~' || c == b'_' || c == b'^' || c == b':' || c == b'!'
 }
 
 fn is_bracket(c: u8) -> bool {
@@ -88,7 +93,8 @@ fn is_bracket(c: u8) -> bool {
 }
 
 fn is_identifier_char(c: u8) -> bool {
-    is_identifier_start_char(c) || c == b'.' || between_inclusive(c, b'0', b'9')
+    is_identifier_start_char(c) || c == b'.' || c == b'#' || c == b'+' || c == b'-'
+        || between_inclusive(c, b'0', b'9')
 }
 
 static NIL: Sexp = Sexp::Nil;
@@ -215,12 +221,17 @@ fn parse_inner<
     let arenas = arenas.into();
     let ArenaPair(sexp_arena, intern_arena) = arenas;
 
+    macro_rules! is_end_of_token {
+        ($counter:expr) => {
+            $counter >= input.len() ||
+                input[$counter].is_ascii_whitespace() ||
+                is_bracket(input[$counter])
+        }
+    }
+
     macro_rules! assert_end_of_token {
         () => {
-            if *counter < input.len() &&
-                !input[*counter].is_ascii_whitespace() &&
-                !is_bracket(input[*counter])
-            {
+            if !is_end_of_token!(*counter) {
                 return Err(format!(
                     "Unexpected token {:?} at character {}",
                     char::from(input[*counter]),
@@ -251,225 +262,325 @@ fn parse_inner<
         }
     }
 
+    macro_rules! make_ident {
+        ($start:expr, $end:expr) => {
+            {
+                let string = str::from_utf8_unchecked(&input[$start..$end]);
+
+                Ok(Sexp::Symbol(string))
+            }
+        }
+    }
+
     if *counter >= input.len() {
         return Err(format!("Unexpected EOF at {}", counter).into());
     }
 
-    loop {
-        skip_whitespace!();
+    skip_whitespace!();
 
-        match input[*counter] {
-            // Cons
-            b'(' => {
+    static TRIPLE_DOT: &[u8] = b"...";
+
+    match input[*counter] {
+        b'.' => {
+            if input[*counter..*counter + TRIPLE_DOT.len()].eq_ignore_ascii_case(TRIPLE_DOT) {
+                *counter += TRIPLE_DOT.len();
+                Ok(Sexp::Symbol(unsafe {
+                    str::from_utf8_unchecked(TRIPLE_DOT)
+                }))
+            } else {
+                Err("Unexpected `.`".into())
+            }
+        }
+        // String
+        b'"' => {
+            *counter += 1;
+            let start = *counter;
+            let mut backslash_locs = SmallVec::<[(usize, Option<u8>); 32]>::new();
+
+            while *counter < input.len() && input[*counter] != b'"' {
+                let cur = input[*counter];
+                if !cur.is_ascii() {
+                    return Err("Non-ascii character in string".into());
+                } else if cur.is_ascii_control() && !(cur == b'\n' || cur == b'\r') {
+                    return Err("Ascii control character in string".into());
+                } else if cur == b'\\' {
+                    // TODO: Handle this properly
+                    backslash_locs.push((
+                        *counter - start,
+                        if input[*counter + 1] == b'n' {
+                            Some(b'\n')
+                        } else if input[*counter] == b'"' || input[*counter] == b'\\' {
+                            None
+                        } else {
+                            return Err(format!(
+                                "Invalid escape: \\{}",
+                                std::char::from_u32(input[*counter] as _)
+                                    .expect("We check non-ASCII above, Q.E.D.")
+                            ).into());
+                        },
+                    ));
+
+                    *counter += 1;
+                }
+
                 *counter += 1;
+            }
 
-                skip_whitespace!();
+            let bytes = &input[start..*counter];
 
-                let mut output: SmallVec<[Sexp; 16]> = SmallVec::new();
-                let mut last = &NIL;
+            let string = if backslash_locs.is_empty() {
+                unsafe { str::from_utf8_unchecked(bytes) }
+            } else {
+                use std::ptr;
 
-                loop {
-                    if *counter >= input.len() {
-                        return Err("Unexpected EOF".into());
-                    } else if input[*counter] == b')' {
-                        *counter += 1;
-                        break;
-                    } else if input[*counter] == b'.' {
+                let string = unsafe { str::from_utf8_unchecked(bytes) };
+                if let Some(interned_string) = intern.get(&string[..]) {
+                    interned_string
+                } else {
+                    let mut without_backslashes = intern_arena.alloc_byte_slice_mut(bytes);
+
+                    for &(loc, replace) in backslash_locs.iter().rev() {
+                        unsafe {
+                            ptr::copy(
+                                &without_backslashes[loc + 1],
+                                &mut without_backslashes[loc],
+                                without_backslashes.len() - loc,
+                            );
+                        }
+
+                        if let Some(replace) = replace {
+                            without_backslashes[loc] = replace;
+                        }
+                    }
+
+                    let without_backslashes =
+                        &without_backslashes[..without_backslashes.len() - backslash_locs.len()];
+
+                    let without_backslashes =
+                        unsafe { str::from_utf8_unchecked(without_backslashes) };
+                    intern.insert(intern_arena, string, without_backslashes);
+                    without_backslashes
+                }
+            };
+
+            *counter += 1;
+
+            Ok(Sexp::String(string))
+        }
+        // Char/boolean/vector
+        b'#' => {
+            *counter += 1;
+
+            static NEWLINE_STR: &[u8] = b"newline";
+            static SPACE_STR: &[u8] = b"space";
+
+            match input[*counter] {
+                b'\\' => {
+                    use std::char;
+
+                    *counter += 1;
+
+                    if input[*counter..*counter + NEWLINE_STR.len()]
+                        .eq_ignore_ascii_case(NEWLINE_STR)
+                    {
+                        *counter += NEWLINE_STR.len();
+                        assert_end_of_token!();
+                        Ok(Sexp::Char('\n'))
+                    } else if input[*counter..*counter + SPACE_STR.len()]
+                        .eq_ignore_ascii_case(SPACE_STR)
+                    {
+                        *counter += SPACE_STR.len();
+                        assert_end_of_token!();
+                        Ok(Sexp::Char(' '))
+                    } else if input[*counter].is_ascii_whitespace() {
+                        Err("Empty character escape".into())
+                    } else {
+                        let c = input[*counter];
+
                         *counter += 1;
 
                         assert_end_of_token!();
-                        skip_whitespace!();
 
-                        last = sexp_arena.alloc(parse_inner(counter, arenas, intern, input)?);
-
-                        skip_whitespace!();
-
-                        if input[*counter] == b')' {
-                            *counter += 1;
-                            break;
-                        } else {
-                            return Err("Invalid cons".into());
-                        }
+                        char::from_u32(c as _)
+                            .map(Sexp::Char)
+                            .ok_or_else(|| format!("Non-ASCII character with code {}", c).into())
                     }
-
-                    let current = parse_inner(counter, arenas, intern, input)?;
-                    output.push(current);
-
-                    skip_whitespace!();
                 }
-
-                if output.is_empty() {
-                    return Ok(Sexp::Nil);
-                } else {
-                    let output = sexp_arena.alloc_many(if output.spilled() {
-                        Cow::from(output.into_vec())
-                    } else {
-                        Cow::from(&output[..])
-                    });
-
-                    return Ok(Sexp::List(output, last));
+                b'(' => {
+                    unimplemented!();
                 }
-            }
-            // String
-            b'"' => {
-                *counter += 1;
-                let start = *counter;
-                let mut backslash_locs = SmallVec::<[usize; 32]>::new();
-
-                while *counter < input.len() && input[*counter] != b'"' {
-                    let cur = input[*counter];
-                    if !cur.is_ascii() {
-                        return Err("Non-ascii character in string".into());
-                    } else if cur.is_ascii_control() && !(cur == b'\n' || cur == b'\r') {
-                        return Err("Ascii control character in string".into());
-                    } else if cur == b'\\' {
-                        // TODO: Handle this properly
-                        backslash_locs.push(*counter - start);
-                        *counter += 1;
-
-                        if input[*counter] != b'"' && input[*counter] != b'\\' {
-                            return Err(format!(
-                                "Invalid escape: \\{}",
-                                std::char::from_u32(input[*counter] as _).expect(
-                                    "We know this is ascii because of the check above, Q.E.D."
-                                )
-                            ).into());
-                        }
-                    }
-
+                b't' => {
                     *counter += 1;
+                    Ok(Sexp::Bool(true))
                 }
-
-                let bytes = &input[start..*counter];
-
-                let string = if backslash_locs.is_empty() {
-                    let string = unsafe { str::from_utf8_unchecked(bytes) };
-                    if let Some(interned_string) = intern.get(string) {
-                        interned_string
-                    } else {
-                        let string = intern_arena.alloc_str(&string);
-                        intern.insert(intern_arena, string, string);
-                        string
-                    }
-                } else {
-                    use std::ptr;
-
-                    let string = unsafe { str::from_utf8_unchecked(bytes) };
-                    if let Some(interned_string) = intern.get(&string[..]) {
-                        interned_string
-                    } else {
-                        let mut without_backslashes = intern_arena.alloc_byte_slice_mut(bytes);
-
-                        for &loc in backslash_locs.iter().rev() {
-                            unsafe {
-                                ptr::copy(
-                                    &without_backslashes[loc + 1],
-                                    &mut without_backslashes[loc],
-                                    without_backslashes.len() - loc,
-                                );
-                            }
-                        }
-
-                        let without_backslashes = &without_backslashes
-                            [..without_backslashes.len() - backslash_locs.len()];
-
-                        let without_backslashes =
-                            unsafe { str::from_utf8_unchecked(without_backslashes) };
-                        intern.insert(intern_arena, string, without_backslashes);
-                        without_backslashes
-                    }
-                };
-
-                *counter += 1;
-
-                return Ok(Sexp::String(string));
-            }
-            // Number (float or int)
-            b'0'..=b'9' => {
-                let mut is_float = false;
-                let start = *counter;
-
-                while *counter < input.len() {
-                    if input[*counter] == b'.' {
-                        is_float = true;
-                        *counter += 1;
-                    } else if between_inclusive(input[*counter], b'0', b'9') {
-                        *counter += 1;
-                    } else {
-                        break;
-                    }
-                }
-
-                assert_end_of_token!();
-
-                let string = unsafe { str::from_utf8_unchecked(&input[start..*counter]) };
-
-                // We only advance if the bytes are in `.0123456789` so we know that it is valid
-                // UTF8
-                return if is_float {
-                    FromStr::from_str(string)
-                        .map(Sexp::Float)
-                        .map_err(|_| format!("Invalid float: {:?}", string).into())
-                } else {
-                    FromStr::from_str(string)
-                        .map(Sexp::Int)
-                        .map_err(|_| format!("Invalid int: {:?}", string).into())
-                };
-            }
-            // Quote
-            b'\'' => {
-                *counter += 1;
-
-                let next_token = parse_inner(counter, arenas, intern, input)?;
-
-                return Ok(Sexp::Quote(sexp_arena.alloc(next_token)));
-            }
-            // MetaQuote
-            b'`' => {
-                *counter += 1;
-
-                let next_token = parse_inner(counter, arenas, intern, input)?;
-
-                return Ok(Sexp::Metaquote(sexp_arena.alloc(next_token)));
-            }
-            // Unquote
-            b',' => {
-                *counter += 1;
-
-                let next_token = parse_inner(counter, arenas, intern, input)?;
-
-                return Ok(Sexp::Unquote(sexp_arena.alloc(next_token)));
-            }
-            // Symbol
-            a if is_identifier_start_char(a) => {
-                let start = *counter;
-                *counter += 1;
-
-                while *counter < input.len() && is_identifier_char(input[*counter]) {
+                b'f' => {
                     *counter += 1;
+                    Ok(Sexp::Bool(false))
                 }
-
-                assert_end_of_token!();
-
-                let string = unsafe { str::from_utf8_unchecked(&input[start..*counter]) };
-                let string = if let Some(interned_string) = intern.get(string) {
-                    interned_string
-                } else {
-                    intern.insert(intern_arena, string, string);
-                    string
-                };
-
-                // We know that it's a valid ascii string because we used `is_identifier_char`
-                return Ok(Sexp::Symbol(string));
-            }
-            other => {
-                return Err(format!(
-                    "Unexpected token {:?} at character {}",
-                    char::from(other),
-                    counter
-                ).into());
+                other => Err(format!(
+                    "Invalid character following hash: {:?}",
+                    ::std::char::from_u32(other as _)
+                ).into()),
             }
         }
+        // Quote
+        b'\'' => {
+            *counter += 1;
+
+            let next_token = parse_inner(counter, arenas, intern, input)?;
+
+            Ok(Sexp::Quote(sexp_arena.alloc(next_token)))
+        }
+        // MetaQuote
+        b'`' => {
+            *counter += 1;
+
+            let next_token = parse_inner(counter, arenas, intern, input)?;
+
+            Ok(Sexp::Metaquote(sexp_arena.alloc(next_token)))
+        }
+        // Unquote
+        b',' => {
+            *counter += 1;
+
+            let make_sexp = if input[*counter] == b'@' {
+                *counter += 1;
+
+                Sexp::UnquoteSplicing
+            } else {
+                Sexp::Unquote
+            };
+
+            let next_token = parse_inner(counter, arenas, intern, input)?;
+
+            Ok(make_sexp(sexp_arena.alloc(next_token)))
+        }
+        // Cons
+        a @ b'(' | a @ b'[' => {
+            let matching = if a == b'(' { b')' } else { b']' };
+
+            *counter += 1;
+
+            skip_whitespace!();
+
+            let mut output: SmallVec<[Sexp; 16]> = SmallVec::new();
+            let mut last = &NIL;
+
+            loop {
+                if *counter >= input.len() {
+                    return Err("Unexpected EOF".into());
+                } else if input[*counter] == matching {
+                    *counter += 1;
+                    break;
+                } else if input[*counter] == b'.' && input[*counter + 1] != b'.' {
+                    *counter += 1;
+
+                    assert_end_of_token!();
+                    skip_whitespace!();
+
+                    last = sexp_arena.alloc(parse_inner(counter, arenas, intern, input)?);
+
+                    skip_whitespace!();
+
+                    if input[*counter] == b')' {
+                        *counter += 1;
+                        break;
+                    } else {
+                        return Err("Invalid cons".into());
+                    }
+                }
+
+                let current = parse_inner(counter, arenas, intern, input)?;
+                output.push(current);
+
+                skip_whitespace!();
+            }
+
+            if output.is_empty() {
+                Ok(Sexp::Nil)
+            } else {
+                let output = sexp_arena.alloc_many(if output.spilled() {
+                    Cow::from(output.into_vec())
+                } else {
+                    Cow::from(&output[..])
+                });
+
+                Ok(Sexp::List(output, last))
+            }
+        }
+        // Symbol
+        a if is_identifier_start_char(a) => {
+            let start = *counter;
+            *counter += 1;
+
+            while *counter < input.len() && is_identifier_char(input[*counter]) {
+                *counter += 1;
+            }
+
+            assert_end_of_token!();
+
+            unsafe { make_ident!(start, *counter) }
+        }
+        // Number (float or int)
+        b'0'..=b'9' | b'+' | b'-' => {
+            let mut is_float = false;
+            let start = *counter;
+
+            *counter += 1;
+
+            while *counter < input.len() {
+                if input[*counter] == b'.' {
+                    is_float = true;
+                    *counter += 1;
+                } else if between_inclusive(input[*counter], b'0', b'9') {
+                    *counter += 1;
+                } else if is_identifier_char(input[*counter]) {
+                    // Yeah, we have to do this ident hack because `1+` and `1-` are too common as
+                    // functions in scheme (even though the spec specifically disallows idents that
+                    // could be mistaken for numbers, only explicitly allowing `+` and `-`)
+
+                    while *counter < input.len() && is_identifier_char(input[*counter]) {
+                        *counter += 1;
+                    }
+
+                    assert_end_of_token!();
+
+                    return unsafe { make_ident!(start, *counter) };
+                } else {
+                    break;
+                }
+            }
+
+            assert_end_of_token!();
+
+            let string = unsafe { str::from_utf8_unchecked(&input[start..*counter]) };
+
+            static PLUS: &str = "+";
+            static MINUS: &str = "-";
+
+            if string == PLUS {
+                return Ok(Sexp::Symbol(PLUS));
+            } else if string == MINUS {
+                return Ok(Sexp::Symbol(MINUS));
+            }
+
+            // We only advance if the bytes are in `.0123456789` so we know that it is valid
+            // UTF8
+            if is_float {
+                FromStr::from_str(string)
+                    .map(Sexp::Float)
+                    .map_err(|_| format!("Invalid float: {:?}", string).into())
+            } else {
+                FromStr::from_str(string)
+                    .map(Sexp::Int)
+                    .map_err(|_| format!("Invalid int: {:?}", string).into())
+            }
+        }
+        other => Err(format!(
+            "Unexpected token {:?} at character {}",
+            char::from(other),
+            counter
+        ).into()),
     }
 }
 
@@ -484,13 +595,13 @@ mod tests {
         () => {
             (b'a'..=b'z')
                 .chain(b'A'..=b'Z')
-                .chain(b"!@#$%^&*-_=+<>?:~/".into_iter().cloned())
+                .chain(b"!@$%^&*_=<>?:~/".into_iter().cloned())
         }
     }
 
     macro_rules! ident_rest {
         () => {
-            ident_start!().chain(::std::iter::once(b'.')).chain(b'0'..=b'9')
+            ident_start!().chain([b'.', b'#', b'+', b'-'].iter().cloned()).chain(b'0'..=b'9')
         }
     }
 
@@ -532,10 +643,10 @@ mod tests {
 
         let intern_arena = Arena::new();
         let mut intern = Default::default();
-        let sexp_arena = Arena::new();
 
         b.iter(|| {
             let mut parser = parse_many::<i64, f64>(slice);
+            let sexp_arena = Arena::new();
 
             loop {
                 if let Some(result) = parser.next((&sexp_arena, &intern_arena), &mut intern) {
@@ -558,8 +669,10 @@ mod tests {
                 &include_bytes!("./filetests/prime-decomposition.lisp")[..],
                 3,
             ),
-            (&include_bytes!("./filetests/combined.lisp")[..], 312),
+            (&include_bytes!("./filetests/combined.lisp")[..], 236),
         ];
+
+        println!("{}", unsafe { ::std::str::from_utf8_unchecked(&files[1].0[88179 - 200..88179 + 200]) });
 
         for &(file, expected_len) in &files {
             assert_eq!(
@@ -640,8 +753,16 @@ mod tests {
             Ok(Sexp::Symbol("has-number-10")),
         );
         assert_eq!(
-            parse::<i64, f64, _>(&arena, &mut intern, b"10-fails").map_err(|_| ()),
-            Err(()),
+            parse::<i64, f64, _>(&arena, &mut intern, b"+1.0+").map_err(|_| ()),
+            Ok(Sexp::Symbol("+1.0+")),
+        );
+        assert_eq!(
+            parse::<i64, f64, _>(&arena, &mut intern, b"+").map_err(|_| ()),
+            Ok(Sexp::Symbol("+")),
+        );
+        assert_eq!(
+            parse::<i64, f64, _>(&arena, &mut intern, b"-").map_err(|_| ()),
+            Ok(Sexp::Symbol("-")),
         );
     }
 
@@ -717,5 +838,4 @@ mod tests {
             }
         }
     }
-
 }
