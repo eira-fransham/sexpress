@@ -492,7 +492,7 @@ fn parse_inner<'a, 'mu, I: FromStr, F: FromStr>(
             *counter += 1;
 
             while *counter < input.len() {
-                if input[*counter] == b'.' {
+                if input[*counter] == b'.' && !is_float {
                     is_float = true;
                     *counter += 1;
                 } else if between_inclusive(input[*counter], b'0', b'9') {
@@ -708,15 +708,19 @@ mod tests {
             Ok(Sexp::Symbol("has-number-10")),
         );
         assert_eq!(
-            parse::<i64, f64>(&arena, b"+1.0+").map_err(|_| ()),
+            parse::<i64, f64>(&arena, b"+1.0+"),
             Ok(Sexp::Symbol("+1.0+")),
         );
         assert_eq!(
-            parse::<i64, f64>(&arena, b"+").map_err(|_| ()),
+            parse::<i64, f64>(&arena, b"1.2.3.4"),
+            Ok(Sexp::Symbol("1.2.3.4")),
+        );
+        assert_eq!(
+            parse::<i64, f64>(&arena, b"+"),
             Ok(Sexp::Symbol("+")),
         );
         assert_eq!(
-            parse::<i64, f64>(&arena, b"-").map_err(|_| ()),
+            parse::<i64, f64>(&arena, b"-"),
             Ok(Sexp::Symbol("-")),
         );
     }
@@ -729,9 +733,11 @@ mod tests {
         assert_eq!(parse::<i64, f64>(&arena, b"10"), Ok(Sexp::Int(10)),);
         assert_eq!(parse::<i64, f64>(&arena, b"10."), Ok(Sexp::Float(10.)),);
         assert_eq!(parse::<i64, f64>(&arena, b"10.5"), Ok(Sexp::Float(10.5)),);
-        assert_eq!(
-            parse::<i64, f64>(&arena, b"10.5.6.7.8").map_err(|_| ()),
-            Err(()),
+        assert!(
+            parse::<i64, f64>(
+                &arena,
+                b"10000000000000000000000000000000000000000000000000000000",
+            ).is_err()
         );
     }
 
