@@ -215,7 +215,7 @@ static NIL: Sexp = Sexp::Nil(BracketStyle::Round);
 pub fn parse<'a, I: FromStr, F: FromStr>(
     arena: &'a Arena,
     input: &'a [u8],
-) -> Result<Sexp<'a>, Cow<'static, str>> {
+) -> Result<Sexp<'a, I, F>, Cow<'static, str>> {
     parse_inner(&mut 0, &mut Default::default(), arena, input)
 }
 
@@ -896,10 +896,12 @@ mod tests {
     fn parses_numbers() {
         let arena = Arena::new();
 
-        assert_eq!(parse::<i64, f64>(&arena, b"2"), Ok(Sexp::Int(2)),);
-        assert_eq!(parse::<i64, f64>(&arena, b"10"), Ok(Sexp::Int(10)),);
-        assert_eq!(parse::<i64, f64>(&arena, b"10."), Ok(Sexp::Float(10.)),);
-        assert_eq!(parse::<i64, f64>(&arena, b"10.5"), Ok(Sexp::Float(10.5)),);
+        assert_eq!(parse::<i64, f64>(&arena, b"2"), Ok(Sexp::Int(2)));
+        assert_eq!(parse::<i64, f64>(&arena, b"10"), Ok(Sexp::Int(10)));
+        assert_eq!(parse::<i64, f64>(&arena, b"10."), Ok(Sexp::Float(10.)));
+        assert_eq!(parse::<i64, f64>(&arena, b"10.5"), Ok(Sexp::Float(10.5)));
+        assert_eq!(parse::<i64, f64>(&arena, b".5"), Ok(Sexp::Float(0.5)));
+        assert!(parse::<u8, f64>(&arena, b"257").is_err());
         assert!(
             parse::<i64, f64>(
                 &arena,
