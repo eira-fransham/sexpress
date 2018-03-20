@@ -57,10 +57,18 @@ macro_rules! sexp {
         $crate::Sexp::List($crate::BracketStyle::Square, &[$(sexp!({$inner}),)*], &sexp!($last))
     };
     (($($inner:tt)+)) => {
-        $crate::Sexp::List($crate::BracketStyle::Round, &[$(sexp!($inner),)*], &$crate::NIL)
+        $crate::Sexp::List(
+            $crate::BracketStyle::Round,
+            &[$(sexp!($inner),)*],
+            &$crate::Sexp::Nil($crate::BracketStyle::Round),
+        )
     };
     ([$($inner:tt)+]) => {
-        $crate::Sexp::List($crate::BracketStyle::Square, &[$(sexp!($inner),)*], &$crate::NIL)
+        $crate::Sexp::List(
+            $crate::BracketStyle::Square,
+            &[$(sexp!($inner),)*],
+            &$crate:Sexp::Nil($crate::BracketStyle::Round),
+        )
     };
 }
 
@@ -122,13 +130,17 @@ impl BracketStyle {
 }
 
 #[derive(Copy, Clone, Debug, PartialEq)]
-pub enum Sexp<'arena, I = i64, F = f64> {
-    Quote(&'arena Sexp<'arena>),
-    Metaquote(&'arena Sexp<'arena>),
-    Unquote(&'arena Sexp<'arena>),
-    UnquoteSplicing(&'arena Sexp<'arena>),
+pub enum Sexp<'arena, I: 'arena = i64, F: 'arena = f64> {
+    Quote(&'arena Sexp<'arena, I, F>),
+    Metaquote(&'arena Sexp<'arena, I, F>),
+    Unquote(&'arena Sexp<'arena, I, F>),
+    UnquoteSplicing(&'arena Sexp<'arena, I, F>),
     // The last element is usally nil
-    List(BracketStyle, &'arena [Sexp<'arena>], &'arena Sexp<'arena>),
+    List(
+        BracketStyle,
+        &'arena [Sexp<'arena, I, F>],
+        &'arena Sexp<'arena, I, F>,
+    ),
     Bool(bool),
     Char(char),
     String(&'arena str),
@@ -157,7 +169,8 @@ impl<'a, I: Display, F: Display> Display for Sexp<'a, I, F> {
                     }
                 }
 
-                if *last != NIL {
+                if let Nil(_) = *last {
+                } else {
                     try!(write!(f, " . {}", last));
                 }
 
@@ -210,9 +223,7 @@ fn is_identifier_char(c: u8) -> bool {
         || between_inclusive(c, b'0', b'9')
 }
 
-static NIL: Sexp = Sexp::Nil(BracketStyle::Round);
-
-pub fn parse<'a, I: FromStr, F: FromStr>(
+pub fn parse<'a, I: FromStr + Copy, F: FromStr + Copy>(
     arena: &'a Arena,
     input: &'a [u8],
 ) -> Result<Sexp<'a, I, F>, Cow<'static, str>> {
@@ -224,7 +235,7 @@ pub struct ParseManyIterator<'a, I, F> {
     arena: &'a Arena,
 }
 
-impl<'a, I: FromStr, F: FromStr> Iterator for ParseManyIterator<'a, I, F> {
+impl<'a, I: 'a + FromStr + Copy, F: 'a + FromStr + Copy> Iterator for ParseManyIterator<'a, I, F> {
     type Item = Result<Sexp<'a, I, F>, Cow<'static, str>>;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -240,7 +251,7 @@ pub struct ParseMany<'a, I, F> {
     _out_types: PhantomData<(I, F)>,
 }
 
-impl<'input, I: FromStr, F: FromStr> ParseMany<'input, I, F> {
+impl<'input, I: FromStr + Copy, F: FromStr + Copy> ParseMany<'input, I, F> {
     pub fn into_iter<'a>(self, arena: &'a Arena) -> ParseManyIterator<'a, I, F>
     where
         'input: 'a,
@@ -288,7 +299,7 @@ pub fn parse_many<I, F>(input: &[u8]) -> ParseMany<I, F> {
     }
 }
 
-fn parse_inner<'a, 'mu, I: FromStr, F: FromStr>(
+fn parse_inner<'a, 'mu, I: FromStr + Copy, F: FromStr + Copy>(
     counter: &'mu mut usize,
     loc_cache: &mut Vec<usize>,
     arena: &'a Arena,
@@ -535,8 +546,8 @@ fn parse_inner<'a, 'mu, I: FromStr, F: FromStr>(
 
             skip_whitespace!();
 
-            let mut output: SmallVec<[Sexp; 16]> = SmallVec::new();
-            let mut last = &NIL;
+            let mut output: SmallVec<[Sexp<_, _>; 16]> = SmallVec::new();
+            let mut last = &Sexp::Nil(BracketStyle::Round);
 
             loop {
                 if *counter >= input.len() {
