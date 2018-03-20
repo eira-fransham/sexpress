@@ -52,7 +52,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 [[package]]
 name = "toolshed"
 version = "0.4.0"
-source = "git+https://github.com/Vurich/toolshed.git?branch=set-tools#c6f16dbe7e3060649317a8d42b84bbbd6fb8c716"
+source = "git+https://github.com/Vurich/toolshed.git?branch=set-tools#cd001d3dc3fbb8c217a8f4958de94d97c6c4cd83"
 dependencies = [
  "fxhash 0.2.1 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
