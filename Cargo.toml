@@ -13,3 +13,4 @@ memmap = "*"
 [features]
 default = []
 debug-output = []
+benches = []

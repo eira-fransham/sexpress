@@ -1,4 +1,4 @@
-#![feature(ascii_ctype, test, conservative_impl_trait)]
+#![cfg_attr(feature = "benches", feature(test))]
 
 extern crate smallvec;
 extern crate toolshed;
@@ -13,6 +13,9 @@ use std::marker::PhantomData;
 
 #[macro_export]
 macro_rules! sexp {
+    (:$($id:tt)*) => {
+        $crate::Sexp::Symbol(stringify!($($id)*))
+    };
     ({@sym $i:expr}) => {
         $crate::Sexp::Symbol($i)
     };
@@ -221,6 +224,10 @@ fn is_bracket(c: u8) -> bool {
 fn is_identifier_char(c: u8) -> bool {
     is_identifier_start_char(c) || c == b'.' || c == b'#' || c == b'+' || c == b'-'
         || between_inclusive(c, b'0', b'9')
+}
+
+pub fn parse_default<'a>(arena: &'a Arena, input: &'a [u8]) -> Result<Sexp<'a>, Cow<'static, str>> {
+    parse(arena, input)
 }
 
 pub fn parse<'a, I: FromStr + Copy, F: FromStr + Copy>(
@@ -678,9 +685,12 @@ fn parse_inner<'a, 'mu, I: FromStr + Copy, F: FromStr + Copy>(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "benches")]
     extern crate test;
 
-    use super::{is_identifier_char, is_identifier_start_char, parse, parse_many, Arena, Sexp};
+    use super::{is_identifier_char, is_identifier_start_char, parse, parse_default, parse_many,
+                Arena, Sexp};
+    #[cfg(feature = "benches")]
     use self::test::Bencher;
 
     macro_rules! ident_start {
@@ -710,97 +720,10 @@ mod tests {
         assert_eq!(
             format!(
                 "{}",
-                parse::<i64, f64>(&arena, test_string.as_bytes()).expect("Formatting failed")
+                parse_default(&arena, test_string.as_bytes()).expect("Formatting failed")
             ),
             test_string.replace('\n', " ").replace("  ", " ").trim()
         );
-    }
-
-    #[bench]
-    fn parses_huge(b: &mut Bencher) {
-        use std::fs::File;
-        use std::io::Read;
-
-        let mut out = vec![];
-        File::open(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/src/filetests/huge.lisp"
-        )).expect("Can't open file")
-            .read_to_end(&mut out)
-            .expect("Failed");
-        let slice = out.as_ref();
-
-        b.iter(|| {
-            let mut parser = parse_many::<i64, f64>(slice);
-
-            loop {
-                let arena = Arena::new();
-
-                if let Some(result) = parser.next(&arena) {
-                    result.expect("Failed");
-                } else {
-                    break;
-                }
-            }
-        });
-    }
-
-    #[bench]
-    fn parses_huge_string(b: &mut Bencher) {
-        use std::fs::File;
-        use std::io::Read;
-
-        let mut out = vec![];
-        File::open(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/src/filetests/huge-string.lisp"
-        )).expect("Can't open file")
-            .read_to_end(&mut out)
-            .expect("Failed");
-        let slice = out.as_ref();
-
-        b.iter(|| {
-            let mut parser = parse_many::<i64, f64>(slice);
-
-            loop {
-                let arena = Arena::new();
-
-                if let Some(result) = parser.next(&arena) {
-                    result.expect("Failed");
-                } else {
-                    break;
-                }
-            }
-        });
-    }
-    #[bench]
-    fn display_huge(b: &mut Bencher) {
-        use std::fs::File;
-        use std::io::{self, Read, Write};
-
-        let mut out = vec![];
-        File::open(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/src/filetests/huge.lisp"
-        )).expect("Can't open file")
-            .read_to_end(&mut out)
-            .expect("Failed");
-        let slice = out.as_ref();
-        let parser = parse_many::<i64, f64>(slice);
-        let arena = Arena::new();
-
-        let massive = parser
-            .into_iter(&arena)
-            .collect::<Result<Vec<_>, _>>()
-            .expect("Parsing failed");
-
-        let mut out = io::sink();
-
-        b.iter(|| {
-            for i in &massive {
-                let _ = writeln!(out, "{}", i);
-            }
-        });
     }
 
     #[test]
@@ -830,15 +753,15 @@ mod tests {
         let arena = Arena::new();
 
         assert_eq!(
-            parse::<i64, f64>(
+            parse_default(
                 &arena,
-                b";; This is a test comment
+                br#";; This is a test comment
 ( set!( get-x-ref myStruct ; So is this
-                        ) 2 \"test\\\\\" '() '(1 2 3))"
+                        ) 2 "test\\" '() '(1 2 3))"#
             ),
             Ok(sexp!(
                 ({@sym "set!"} ({@sym "get-x-ref"}
-                                {@sym "myStruct"})
+                                {:myStruct})
                  {@int 2}
                  {@str "test\\"}
                  (quote ())
@@ -854,17 +777,17 @@ mod tests {
         let arena = Arena::new();
 
         assert_eq!(
-            parse::<i64, f64>(&arena, b"\"Test!\""),
+            parse_default(&arena, b"\"Test!\""),
             Ok(Sexp::String("Test!"))
         );
 
         assert_eq!(
-            parse::<i64, f64>(&arena, b"\"(((}{{}{}{}}}}\""),
+            parse_default(&arena, b"\"(((}{{}{}{}}}}\""),
             Ok(Sexp::String("(((}{{}{}{}}}}"))
         );
 
         assert_eq!(
-            parse::<i64, f64>(&arena, br#""\\\"\"\\\n""#),
+            parse_default(&arena, br#""\\\"\"\\\n""#),
             Ok(Sexp::String("\\\"\"\\\n"))
         );
     }
@@ -874,45 +797,42 @@ mod tests {
         let arena = Arena::new();
 
         assert_eq!(
-            parse::<i64, f64>(&arena, b"testing-a-thing"),
+            parse_default(&arena, b"testing-a-thing"),
             Ok(Sexp::Symbol("testing-a-thing")),
         );
         assert_eq!(
-            parse::<i64, f64>(&arena, b"has-number-10"),
+            parse_default(&arena, b"has-number-10"),
             Ok(Sexp::Symbol("has-number-10")),
         );
+        assert_eq!(parse_default(&arena, b"+1.0+"), Ok(Sexp::Symbol("+1.0+")),);
         assert_eq!(
-            parse::<i64, f64>(&arena, b"+1.0+"),
-            Ok(Sexp::Symbol("+1.0+")),
-        );
-        assert_eq!(
-            parse::<i64, f64>(&arena, b"1.2.3.4"),
+            parse_default(&arena, b"1.2.3.4"),
             Ok(Sexp::Symbol("1.2.3.4")),
         );
-        assert_eq!(parse::<i64, f64>(&arena, b"+"), Ok(Sexp::Symbol("+")),);
-        assert_eq!(parse::<i64, f64>(&arena, b"-"), Ok(Sexp::Symbol("-")),);
+        assert_eq!(parse_default(&arena, b"+"), Ok(Sexp::Symbol("+")),);
+        assert_eq!(parse_default(&arena, b"-"), Ok(Sexp::Symbol("-")),);
     }
 
     #[test]
     fn parses_bool() {
         let arena = Arena::new();
 
-        assert_eq!(parse::<i64, f64>(&arena, b"#t"), Ok(Sexp::Bool(true)),);
-        assert_eq!(parse::<i64, f64>(&arena, b"#f"), Ok(Sexp::Bool(false)),);
+        assert_eq!(parse_default(&arena, b"#t"), Ok(Sexp::Bool(true)),);
+        assert_eq!(parse_default(&arena, b"#f"), Ok(Sexp::Bool(false)),);
     }
 
     #[test]
     fn parses_numbers() {
         let arena = Arena::new();
 
-        assert_eq!(parse::<i64, f64>(&arena, b"2"), Ok(Sexp::Int(2)));
-        assert_eq!(parse::<i64, f64>(&arena, b"10"), Ok(Sexp::Int(10)));
-        assert_eq!(parse::<i64, f64>(&arena, b"10."), Ok(Sexp::Float(10.)));
-        assert_eq!(parse::<i64, f64>(&arena, b"10.5"), Ok(Sexp::Float(10.5)));
-        assert_eq!(parse::<i64, f64>(&arena, b".5"), Ok(Sexp::Float(0.5)));
+        assert_eq!(parse_default(&arena, b"2"), Ok(Sexp::Int(2)));
+        assert_eq!(parse_default(&arena, b"10"), Ok(Sexp::Int(10)));
+        assert_eq!(parse_default(&arena, b"10."), Ok(Sexp::Float(10.)));
+        assert_eq!(parse_default(&arena, b"10.5"), Ok(Sexp::Float(10.5)));
+        assert_eq!(parse_default(&arena, b".5"), Ok(Sexp::Float(0.5)));
         assert!(parse::<u8, f64>(&arena, b"257").is_err());
         assert!(
-            parse::<i64, f64>(
+            parse_default(
                 &arena,
                 b"10000000000000000000000000000000000000000000000000000000",
             ).is_err()
@@ -963,5 +883,96 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[bench]
+    #[cfg(feature = "benches")]
+    fn parses_huge(b: &mut Bencher) {
+        use std::fs::File;
+        use std::io::Read;
+
+        let mut out = vec![];
+        File::open(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/filetests/huge.lisp"
+        )).expect("Can't open file")
+            .read_to_end(&mut out)
+            .expect("Failed");
+        let slice = out.as_ref();
+
+        b.iter(|| {
+            let mut parser = parse_many::<i64, f64>(slice);
+
+            loop {
+                let arena = Arena::new();
+
+                if let Some(result) = parser.next(&arena) {
+                    result.expect("Failed");
+                } else {
+                    break;
+                }
+            }
+        });
+    }
+
+    #[bench]
+    #[cfg(feature = "benches")]
+    fn parses_huge_string(b: &mut Bencher) {
+        use std::fs::File;
+        use std::io::Read;
+
+        let mut out = vec![];
+        File::open(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/filetests/huge-string.lisp"
+        )).expect("Can't open file")
+            .read_to_end(&mut out)
+            .expect("Failed");
+        let slice = out.as_ref();
+
+        b.iter(|| {
+            let mut parser = parse_many::<i64, f64>(slice);
+
+            loop {
+                let arena = Arena::new();
+
+                if let Some(result) = parser.next(&arena) {
+                    result.expect("Failed");
+                } else {
+                    break;
+                }
+            }
+        });
+    }
+
+    #[bench]
+    #[cfg(feature = "benches")]
+    fn display_huge(b: &mut Bencher) {
+        use std::fs::File;
+        use std::io::{self, Read, Write};
+
+        let mut out = vec![];
+        File::open(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/filetests/huge.lisp"
+        )).expect("Can't open file")
+            .read_to_end(&mut out)
+            .expect("Failed");
+        let slice = out.as_ref();
+        let parser = parse_many::<i64, f64>(slice);
+        let arena = Arena::new();
+
+        let massive = parser
+            .into_iter(&arena)
+            .collect::<Result<Vec<_>, _>>()
+            .expect("Parsing failed");
+
+        let mut out = io::sink();
+
+        b.iter(|| {
+            for i in &massive {
+                let _ = writeln!(out, "{}", i);
+            }
+        });
     }
 }
