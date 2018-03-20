@@ -721,16 +721,15 @@ mod tests {
 
         b.iter(|| {
             let mut parser = parse_many::<i64, f64>(slice);
-            let arena = Arena::new();
 
             loop {
+                let arena = Arena::new();
+
                 if let Some(result) = parser.next(&arena) {
                     result.expect("Failed");
                 } else {
                     break;
                 }
-
-                unsafe { arena.clear() };
             }
         });
     }
@@ -751,16 +750,15 @@ mod tests {
 
         b.iter(|| {
             let mut parser = parse_many::<i64, f64>(slice);
-            let arena = Arena::new();
 
             loop {
+                let arena = Arena::new();
+
                 if let Some(result) = parser.next(&arena) {
                     result.expect("Failed");
                 } else {
                     break;
                 }
-
-                unsafe { arena.clear() };
             }
         });
     }
