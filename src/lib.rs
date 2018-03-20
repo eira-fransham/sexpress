@@ -1,16 +1,125 @@
-#![feature(dotdoteq_in_patterns, inclusive_range_syntax, ascii_ctype, test,
-           conservative_impl_trait)]
+#![feature(ascii_ctype, test, conservative_impl_trait)]
 
 extern crate smallvec;
 extern crate toolshed;
 
-use toolshed::Arena;
 use smallvec::SmallVec;
 
+use toolshed::Arena;
 use std::fmt::{self, Display, Formatter};
 use std::str::FromStr;
 use std::borrow::Cow;
 use std::marker::PhantomData;
+
+#[macro_export]
+macro_rules! sexp {
+    ({@sym $i:expr}) => {
+        $crate::Sexp::Symbol($i)
+    };
+    ({@str $i:expr}) => {
+        $crate::Sexp::String($i)
+    };
+    ({@int $i:expr}) => {
+        $crate::Sexp::Int($i)
+    };
+    ({@flt $i:expr}) => {
+        $crate::Sexp::Float($i)
+    };
+    ({@chr $i:expr}) => {
+        $crate::Sexp::Char($i)
+    };
+    // For if the other parsing is ambiguous
+    ({$($other:tt)*}) => {
+        sexp!($($other)*)
+    };
+    (()) => {
+        $crate::Sexp::Nil($crate::BracketStyle::Round)
+    };
+    ([]) => {
+        $crate::Sexp::Nil($crate::BracketStyle::Square)
+    };
+    ((quote $inner:tt)) => {
+        $crate::Sexp::Quote(&sexp!($inner))
+    };
+    ((metaquote $inner:tt)) => {
+        $crate::Sexp::Metaquote(&sexp!($inner))
+    };
+    ((unquote $inner:tt)) => {
+        $crate::Sexp::Unquote(&sexp!($inner))
+    };
+    ((unquote-splicing $inner:tt)) => {
+        $crate::Sexp::UnquoteSplicing(&sexp!($inner))
+    };
+    ((cons $({$first:tt})* . $last:tt)) => {
+        $crate::Sexp::List($crate::BracketStyle::Round, &[$(sexp!({$inner}),)*], &sexp!($last))
+    };
+    ([cons $({$first:tt})* . $last:tt]) => {
+        $crate::Sexp::List($crate::BracketStyle::Square, &[$(sexp!({$inner}),)*], &sexp!($last))
+    };
+    (($($inner:tt)+)) => {
+        $crate::Sexp::List($crate::BracketStyle::Round, &[$(sexp!($inner),)*], &$crate::NIL)
+    };
+    ([$($inner:tt)+]) => {
+        $crate::Sexp::List($crate::BracketStyle::Square, &[$(sexp!($inner),)*], &$crate::NIL)
+    };
+}
+
+#[cfg(feature = "debug-output")]
+macro_rules! debug {
+    (@preamble) => {{
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static DEBUG: AtomicUsize = AtomicUsize::new(0);
+        print!(
+            "{:04} {}:{},{}",
+            DEBUG.fetch_add(1, Ordering::Relaxed),
+            file!(),
+            line!(),
+            column!(),
+        );
+    }};
+    () => {
+        debug!(@preamble);
+        println!();
+    };
+    ($first:expr $(, $rest:expr)* $(,)*) => {
+        debug!(@preamble);
+        print!(" (");
+        print!("{} = {:?}", stringify!($first), $first);
+        $(print!(", {} = {:?}", stringify!($rest), $rest);)*
+        print!(")");
+        println!();
+    };
+}
+
+#[cfg(not(feature = "debug-output"))]
+macro_rules! debug {
+    ($($any:tt)*) => {}
+}
+
+// TODO: Braces
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum BracketStyle {
+    Round,
+    Square,
+}
+
+impl BracketStyle {
+    #[inline]
+    pub fn from_open_unchecked(open: u8) -> Self {
+        match open {
+            b'(' => BracketStyle::Round,
+            _ => BracketStyle::Square,
+        }
+    }
+
+    #[inline]
+    pub fn chars(&self) -> (char, char) {
+        match *self {
+            BracketStyle::Round => ('(', ')'),
+            BracketStyle::Square => ('[', ']'),
+        }
+    }
+}
 
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub enum Sexp<'arena, I = i64, F = f64> {
@@ -19,14 +128,14 @@ pub enum Sexp<'arena, I = i64, F = f64> {
     Unquote(&'arena Sexp<'arena>),
     UnquoteSplicing(&'arena Sexp<'arena>),
     // The last element is usally nil
-    List(&'arena [Sexp<'arena>], &'arena Sexp<'arena>),
+    List(BracketStyle, &'arena [Sexp<'arena>], &'arena Sexp<'arena>),
     Bool(bool),
     Char(char),
     String(&'arena str),
     Symbol(&'arena str),
     Int(I),
     Float(F),
-    Nil,
+    Nil(BracketStyle),
 }
 
 impl<'a, I: Display, F: Display> Display for Sexp<'a, I, F> {
@@ -37,21 +146,22 @@ impl<'a, I: Display, F: Display> Display for Sexp<'a, I, F> {
             Quote(el) => write!(f, "'{}", el),
             Metaquote(el) => write!(f, "`{}", el),
             Unquote(el) => write!(f, ",{}", el),
-            UnquoteSplicing(el) => write!(f, ",{}", el),
-            List(xs, last) => {
-                write!(f, "(")?;
+            UnquoteSplicing(el) => write!(f, ",@{}", el),
+            List(style, xs, last) => {
+                let (open, close) = style.chars();
+                try!(write!(f, "{}", open));
                 if let Some((first, rest)) = xs.split_first() {
-                    write!(f, "{}", first)?;
+                    try!(write!(f, "{}", first));
                     for x in rest {
-                        write!(f, " {}", x)?;
+                        try!(write!(f, " {}", x));
                     }
                 }
 
-                if *last != Nil {
-                    write!(f, " . {}", last)?;
+                if *last != NIL {
+                    try!(write!(f, " . {}", last));
                 }
 
-                write!(f, ")")
+                write!(f, "{}", close)
             }
             Bool(b) => write!(f, r"#{}", if b { 't' } else { 'f' }),
             Char(c) => write!(f, r"#\{}", c),
@@ -59,7 +169,10 @@ impl<'a, I: Display, F: Display> Display for Sexp<'a, I, F> {
             Symbol(sym) => write!(f, "{}", sym),
             Int(ref n) => write!(f, "{}", n),
             Float(ref n) => write!(f, "{}", n),
-            Nil => write!(f, "()"),
+            Nil(style) => {
+                let (open, close) = style.chars();
+                write!(f, "{}{}", open, close)
+            }
         }
     }
 }
@@ -67,7 +180,7 @@ impl<'a, I: Display, F: Display> Display for Sexp<'a, I, F> {
 impl<'a, I, F> Sexp<'a, I, F> {
     pub fn len(&self) -> Option<usize> {
         match *self {
-            Sexp::List(arr, el) => Some(arr.len() + el.len().unwrap_or(0)),
+            Sexp::List(_, arr, el) => Some(arr.len() + el.len().unwrap_or(0)),
             _ => None,
         }
     }
@@ -78,6 +191,7 @@ fn between_inclusive(a: u8, b: u8, c: u8) -> bool {
     a.wrapping_sub(b) <= c.wrapping_sub(b)
 }
 
+#[inline(always)]
 fn is_identifier_start_char(c: u8) -> bool {
     between_inclusive(c, b'a', b'z') ||
         // We start at < to get <=>?@
@@ -85,22 +199,24 @@ fn is_identifier_start_char(c: u8) -> bool {
         || c == b'*' || c == b'~' || c == b'_' || c == b'^' || c == b':' || c == b'!'
 }
 
+#[inline(always)]
 fn is_bracket(c: u8) -> bool {
     c == b'[' || c == b']' || c == b'(' || c == b')' || c == b'{' || c == b'}'
 }
 
+#[inline(always)]
 fn is_identifier_char(c: u8) -> bool {
     is_identifier_start_char(c) || c == b'.' || c == b'#' || c == b'+' || c == b'-'
         || between_inclusive(c, b'0', b'9')
 }
 
-static NIL: Sexp = Sexp::Nil;
+static NIL: Sexp = Sexp::Nil(BracketStyle::Round);
 
 pub fn parse<'a, I: FromStr, F: FromStr>(
     arena: &'a Arena,
     input: &'a [u8],
 ) -> Result<Sexp<'a>, Cow<'static, str>> {
-    parse_inner(&mut 0, arena, input)
+    parse_inner(&mut 0, &mut Default::default(), arena, input)
 }
 
 pub struct ParseManyIterator<'a, I, F> {
@@ -120,6 +236,7 @@ pub struct ParseMany<'a, I, F> {
     counter: usize,
     err: bool,
     input: &'a [u8],
+    cache: Vec<usize>,
     _out_types: PhantomData<(I, F)>,
 }
 
@@ -148,7 +265,7 @@ impl<'input, I: FromStr, F: FromStr> ParseMany<'input, I, F> {
         if self.err || self.counter >= self.input.len() {
             None
         } else {
-            match parse_inner(&mut self.counter, arena, self.input) {
+            match parse_inner(&mut self.counter, &mut self.cache, arena, self.input) {
                 Ok(sexp) => Some(Ok(sexp)),
                 Err(err) => {
                     self.err = true;
@@ -160,25 +277,12 @@ impl<'input, I: FromStr, F: FromStr> ParseMany<'input, I, F> {
     }
 }
 
-#[derive(Copy, Clone)]
-pub struct ArenaPair<'im_sexp, 'im_intern>(&'im_sexp Arena, &'im_intern Arena);
-
-impl<'a> From<&'a Arena> for ArenaPair<'a, 'a> {
-    fn from(other: &'a Arena) -> Self {
-        ArenaPair(other, other)
-    }
-}
-
-impl<'a, 'b> From<(&'a Arena, &'b Arena)> for ArenaPair<'a, 'b> {
-    fn from(other: (&'a Arena, &'b Arena)) -> Self {
-        ArenaPair(other.0, other.1)
-    }
-}
-
+#[inline]
 pub fn parse_many<I, F>(input: &[u8]) -> ParseMany<I, F> {
     ParseMany {
         counter: 0,
         err: false,
+        cache: Default::default(),
         _out_types: PhantomData,
         input,
     }
@@ -186,6 +290,7 @@ pub fn parse_many<I, F>(input: &[u8]) -> ParseMany<I, F> {
 
 fn parse_inner<'a, 'mu, I: FromStr, F: FromStr>(
     counter: &'mu mut usize,
+    loc_cache: &mut Vec<usize>,
     arena: &'a Arena,
     input: &'a [u8],
 ) -> Result<Sexp<'a, I, F>, Cow<'static, str>> {
@@ -248,27 +353,18 @@ fn parse_inner<'a, 'mu, I: FromStr, F: FromStr>(
 
     skip_whitespace!();
 
-    static TRIPLE_DOT: &[u8] = b"...";
+    static PLUS: &str = "+";
+    static MINUS: &str = "-";
 
     match input[*counter] {
-        b'.' => {
-            if input[*counter..*counter + TRIPLE_DOT.len()].eq_ignore_ascii_case(TRIPLE_DOT) {
-                *counter += TRIPLE_DOT.len();
-                Ok(Sexp::Symbol(unsafe {
-                    str::from_utf8_unchecked(TRIPLE_DOT)
-                }))
-            } else {
-                Err("Unexpected `.`".into())
-            }
-        }
         // String
         b'"' => {
+            const VALID_ESCAPES: &[u8] = &[b'\'', b'"', b'n', b'\\'];
+
             *counter += 1;
             let start = *counter;
 
-            // This is marginally faster than storing them in the same array
-            let mut backslash_locs = SmallVec::<[usize; 32]>::new();
-            let mut newline_locs = SmallVec::<[usize; 32]>::new();
+            let escape_locs = loc_cache;
 
             while *counter < input.len() && input[*counter] != b'"' {
                 let cur = input[*counter];
@@ -277,13 +373,11 @@ fn parse_inner<'a, 'mu, I: FromStr, F: FromStr>(
                 } else if cur.is_ascii_control() && cur != b'\n' && cur != b'\r' {
                     return Err("Ascii control character in string".into());
                 } else if cur == b'\\' {
-                    backslash_locs.push(*counter - start);
-
                     *counter += 1;
 
-                    if input[*counter] == b'n' {
-                        newline_locs.push(*counter - start);
-                    } else if input[*counter] != b'"' && input[*counter] != b'\\' {
+                    escape_locs.push(*counter - start);
+
+                    if !VALID_ESCAPES.contains(&input[*counter]) {
                         return Err(format!(
                             "Invalid escape: \\{}",
                             std::char::from_u32(input[*counter] as _)
@@ -297,32 +391,46 @@ fn parse_inner<'a, 'mu, I: FromStr, F: FromStr>(
 
             let bytes = &input[start..*counter];
 
-            let string = if backslash_locs.is_empty() {
+            let string = if escape_locs.is_empty() {
                 unsafe { str::from_utf8_unchecked(bytes) }
             } else {
                 use std::ptr;
 
-                let mut without_backslashes = arena.alloc_byte_slice_mut(bytes);
+                debug!();
+                let mut without_backslashes = arena.require(bytes.len());
 
-                for loc in newline_locs.into_iter() {
-                    without_backslashes[loc] = b'\n';
-                }
+                let mut last_loc = 0;
+                let mut out_loc = 0;
 
-                for &loc in backslash_locs.iter().rev() {
+                for &loc in escape_locs.iter() {
+                    let copy_len = loc - last_loc - 1;
                     unsafe {
                         ptr::copy(
-                            &without_backslashes[loc + 1],
-                            &mut without_backslashes[loc],
-                            without_backslashes.len() - loc,
+                            &bytes[last_loc],
+                            without_backslashes.offset(out_loc as _),
+                            copy_len,
                         );
                     }
+
+                    out_loc += copy_len;
+
+                    if bytes[loc] == b'n' {
+                        unsafe { *without_backslashes.offset(out_loc as _) = b'\n' };
+                    } else {
+                        unsafe { *without_backslashes.offset(out_loc as _) = bytes[loc] };
+                    }
+
+                    out_loc += 1;
+
+                    last_loc = loc + 1;
                 }
 
-                let without_backslashes =
-                    &without_backslashes[..without_backslashes.len() - backslash_locs.len()];
+                escape_locs.clear();
 
                 let without_backslashes =
-                    unsafe { str::from_utf8_unchecked(without_backslashes) };
+                    unsafe { std::slice::from_raw_parts(without_backslashes, out_loc) };
+
+                let without_backslashes = unsafe { str::from_utf8_unchecked(without_backslashes) };
                 without_backslashes
             };
 
@@ -343,15 +451,11 @@ fn parse_inner<'a, 'mu, I: FromStr, F: FromStr>(
 
                     *counter += 1;
 
-                    if input[*counter..*counter + NEWLINE_STR.len()]
-                        .eq_ignore_ascii_case(NEWLINE_STR)
-                    {
+                    if &input[*counter..*counter + NEWLINE_STR.len()] == NEWLINE_STR {
                         *counter += NEWLINE_STR.len();
                         assert_end_of_token!();
                         Ok(Sexp::Char('\n'))
-                    } else if input[*counter..*counter + SPACE_STR.len()]
-                        .eq_ignore_ascii_case(SPACE_STR)
-                    {
+                    } else if &input[*counter..*counter + SPACE_STR.len()] == SPACE_STR {
                         *counter += SPACE_STR.len();
                         assert_end_of_token!();
                         Ok(Sexp::Char(' '))
@@ -390,16 +494,18 @@ fn parse_inner<'a, 'mu, I: FromStr, F: FromStr>(
         b'\'' => {
             *counter += 1;
 
-            let next_token = parse_inner(counter, arena, input)?;
+            let next_token = try!(parse_inner(counter, loc_cache, arena, input));
 
+            debug!();
             Ok(Sexp::Quote(arena.alloc(next_token)))
         }
         // MetaQuote
         b'`' => {
             *counter += 1;
 
-            let next_token = parse_inner(counter, arena, input)?;
+            let next_token = try!(parse_inner(counter, loc_cache, arena, input));
 
+            debug!();
             Ok(Sexp::Metaquote(arena.alloc(next_token)))
         }
         // Unquote
@@ -414,13 +520,16 @@ fn parse_inner<'a, 'mu, I: FromStr, F: FromStr>(
                 Sexp::Unquote
             };
 
-            let next_token = parse_inner(counter, arena, input)?;
+            let next_token = try!(parse_inner(counter, loc_cache, arena, input));
 
+            debug!();
             Ok(make_sexp(arena.alloc(next_token)))
         }
         // Cons
         a @ b'(' | a @ b'[' => {
-            let matching = if a == b'(' { b')' } else { b']' };
+            let style = BracketStyle::from_open_unchecked(a);
+            let (_, matching) = style.chars();
+            let matching = matching as u8;
 
             *counter += 1;
 
@@ -435,40 +544,45 @@ fn parse_inner<'a, 'mu, I: FromStr, F: FromStr>(
                 } else if input[*counter] == matching {
                     *counter += 1;
                     break;
-                } else if input[*counter] == b'.' && input[*counter + 1] != b'.' {
+                } else if input[*counter] == b'.' && is_end_of_token!(*counter + 1) {
                     *counter += 1;
 
                     assert_end_of_token!();
                     skip_whitespace!();
 
-                    last = arena.alloc(parse_inner(counter, arena, input)?);
+                    debug!();
+                    last = arena.alloc(try!(parse_inner(counter, loc_cache, arena, input)));
 
                     skip_whitespace!();
 
-                    if input[*counter] == b')' {
+                    if is_bracket(input[*counter]) {
                         *counter += 1;
                         break;
                     } else {
+                        debug!(counter, unsafe {
+                            str::from_utf8_unchecked(&input[*counter - 20..*counter + 20])
+                        });
                         return Err("Invalid cons".into());
                     }
                 }
 
-                let current = parse_inner(counter, arena, input)?;
+                let current = try!(parse_inner(counter, loc_cache, arena, input));
                 output.push(current);
 
                 skip_whitespace!();
             }
 
             if output.is_empty() {
-                Ok(Sexp::Nil)
+                Ok(Sexp::Nil(style))
             } else {
+                debug!(output);
                 let output = arena.alloc_many(if output.spilled() {
                     Cow::from(output.into_vec())
                 } else {
                     Cow::from(&output[..])
                 });
 
-                Ok(Sexp::List(output, last))
+                Ok(Sexp::List(style, output, last))
             }
         }
         // Symbol
@@ -484,9 +598,17 @@ fn parse_inner<'a, 'mu, I: FromStr, F: FromStr>(
 
             unsafe { make_ident!(start, *counter) }
         }
+        b'+' if is_end_of_token!(*counter + 1) => {
+            *counter += 1;
+            Ok(Sexp::Symbol(PLUS))
+        }
+        b'-' if is_end_of_token!(*counter + 1) => {
+            *counter += 1;
+            Ok(Sexp::Symbol(MINUS))
+        }
         // Number (float or int)
-        b'0'..=b'9' | b'+' | b'-' => {
-            let mut is_float = false;
+        b'.' | b'0'..=b'9' | b'+' | b'-' => {
+            let mut is_float = input[*counter] == b'.';
             let start = *counter;
 
             *counter += 1;
@@ -508,7 +630,12 @@ fn parse_inner<'a, 'mu, I: FromStr, F: FromStr>(
 
                     assert_end_of_token!();
 
-                    return unsafe { make_ident!(start, *counter) };
+                    return if &input[start..*counter] == b"." {
+                        Err("Unexpected `.`".into())
+                    } else {
+                        // We check `is_identifier_char` so this is safe.
+                        unsafe { make_ident!(start, *counter) }
+                    };
                 } else {
                     break;
                 }
@@ -516,19 +643,10 @@ fn parse_inner<'a, 'mu, I: FromStr, F: FromStr>(
 
             assert_end_of_token!();
 
-            let string = unsafe { str::from_utf8_unchecked(&input[start..*counter]) };
-
-            static PLUS: &str = "+";
-            static MINUS: &str = "-";
-
-            if string == PLUS {
-                return Ok(Sexp::Symbol(PLUS));
-            } else if string == MINUS {
-                return Ok(Sexp::Symbol(MINUS));
-            }
-
             // We only advance if the bytes are in `.0123456789` so we know that it is valid
             // UTF8
+            let string = unsafe { str::from_utf8_unchecked(&input[start..*counter]) };
+
             if is_float {
                 FromStr::from_str(string)
                     .map(Sexp::Float)
@@ -570,22 +688,21 @@ mod tests {
 
     #[test]
     fn displays_correctly() {
-        let cases = [
-            "((hello 2 5) world . 10)",
-            "('(hello 2 5) 'world . '10)",
-            "(`(,hello 2 5) `world . `10)",
-        ];
+        let test_string = r#"
+(([hello 2 5] '`[] world . 10)
+ ('(hello 2 5) [0 . [1 . (2 . 3)]] 'world . '10)
+ (`(,hello 2 5) `world . `10)
+ (`(,@(test 1 2 3) ,@'() 5) `world . `10))
+"#;
         let arena = Arena::new();
 
-        for case in &cases {
-            assert_eq!(
-                &format!(
-                    "{}",
-                    parse::<i64, f64>(&arena, case.as_bytes()).expect("Formatting failed")
-                ),
-                case
-            );
-        }
+        assert_eq!(
+            format!(
+                "{}",
+                parse::<i64, f64>(&arena, test_string.as_bytes()).expect("Formatting failed")
+            ),
+            test_string.replace('\n', " ").replace("  ", " ").trim()
+        );
     }
 
     #[bench]
@@ -618,6 +735,65 @@ mod tests {
         });
     }
 
+    #[bench]
+    fn parses_huge_string(b: &mut Bencher) {
+        use std::fs::File;
+        use std::io::Read;
+
+        let mut out = vec![];
+        File::open(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/filetests/huge-string.lisp"
+        )).expect("Can't open file")
+            .read_to_end(&mut out)
+            .expect("Failed");
+        let slice = out.as_ref();
+
+        b.iter(|| {
+            let mut parser = parse_many::<i64, f64>(slice);
+            let arena = Arena::new();
+
+            loop {
+                if let Some(result) = parser.next(&arena) {
+                    result.expect("Failed");
+                } else {
+                    break;
+                }
+
+                unsafe { arena.clear() };
+            }
+        });
+    }
+    #[bench]
+    fn display_huge(b: &mut Bencher) {
+        use std::fs::File;
+        use std::io::{self, Read, Write};
+
+        let mut out = vec![];
+        File::open(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/filetests/huge.lisp"
+        )).expect("Can't open file")
+            .read_to_end(&mut out)
+            .expect("Failed");
+        let slice = out.as_ref();
+        let parser = parse_many::<i64, f64>(slice);
+        let arena = Arena::new();
+
+        let massive = parser
+            .into_iter(&arena)
+            .collect::<Result<Vec<_>, _>>()
+            .expect("Parsing failed");
+
+        let mut out = io::sink();
+
+        b.iter(|| {
+            for i in &massive {
+                let _ = writeln!(out, "{}", i);
+            }
+        });
+    }
+
     #[test]
     fn parses_files() {
         let arena = Arena::new();
@@ -628,10 +804,6 @@ mod tests {
             ),
             (&include_bytes!("./filetests/combined.lisp")[..], 236),
         ];
-
-        println!("{}", unsafe {
-            ::std::str::from_utf8_unchecked(&files[1].0[88179 - 200..88179 + 200])
-        });
 
         for &(file, expected_len) in &files {
             assert_eq!(
@@ -655,22 +827,15 @@ mod tests {
 ( set!( get-x-ref myStruct ; So is this
                         ) 2 \"test\\\\\" '() '(1 2 3))"
             ),
-            Ok(Sexp::List(
-                &[
-                    Sexp::Symbol("set!"),
-                    Sexp::List(
-                        &[Sexp::Symbol("get-x-ref"), Sexp::Symbol("myStruct")],
-                        &Sexp::Nil
-                    ),
-                    Sexp::Int(2),
-                    Sexp::String("test\\"),
-                    Sexp::Quote(&Sexp::Nil),
-                    Sexp::Quote(&Sexp::List(
-                        &[Sexp::Int(1), Sexp::Int(2), Sexp::Int(3)],
-                        &Sexp::Nil
-                    )),
-                ],
-                &Sexp::Nil,
+            Ok(sexp!(
+                ({@sym "set!"} ({@sym "get-x-ref"}
+                                {@sym "myStruct"})
+                 {@int 2}
+                 {@str "test\\"}
+                 (quote ())
+                 (quote ({@int 1}
+                         {@int 2}
+                         {@int 3})))
             ))
         );
     }
@@ -715,14 +880,16 @@ mod tests {
             parse::<i64, f64>(&arena, b"1.2.3.4"),
             Ok(Sexp::Symbol("1.2.3.4")),
         );
-        assert_eq!(
-            parse::<i64, f64>(&arena, b"+"),
-            Ok(Sexp::Symbol("+")),
-        );
-        assert_eq!(
-            parse::<i64, f64>(&arena, b"-"),
-            Ok(Sexp::Symbol("-")),
-        );
+        assert_eq!(parse::<i64, f64>(&arena, b"+"), Ok(Sexp::Symbol("+")),);
+        assert_eq!(parse::<i64, f64>(&arena, b"-"), Ok(Sexp::Symbol("-")),);
+    }
+
+    #[test]
+    fn parses_bool() {
+        let arena = Arena::new();
+
+        assert_eq!(parse::<i64, f64>(&arena, b"#t"), Ok(Sexp::Bool(true)),);
+        assert_eq!(parse::<i64, f64>(&arena, b"#f"), Ok(Sexp::Bool(false)),);
     }
 
     #[test]

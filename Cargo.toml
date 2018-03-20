@@ -9,3 +9,7 @@ smallvec = "*"
 
 [dev-dependencies]
 memmap = "*"
+
+[features]
+default = []
+debug-output = []
