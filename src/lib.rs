@@ -898,7 +898,9 @@ mod tests {
         )).expect("Can't open file")
             .read_to_end(&mut out)
             .expect("Failed");
-        let slice = out.as_ref();
+        let slice: &[u8] = out.as_ref();
+
+        b.bytes = slice.len() as u64;
 
         b.iter(|| {
             let mut parser = parse_many::<i64, f64>(slice);
@@ -928,7 +930,9 @@ mod tests {
         )).expect("Can't open file")
             .read_to_end(&mut out)
             .expect("Failed");
-        let slice = out.as_ref();
+        let slice: &[u8] = out.as_ref();
+
+        b.bytes = slice.len() as u64;
 
         b.iter(|| {
             let mut parser = parse_many::<i64, f64>(slice);
@@ -949,6 +953,7 @@ mod tests {
     #[cfg(feature = "benches")]
     fn display_huge(b: &mut Bencher) {
         use std::fs::File;
+        use std::fmt::Write as FWrite;
         use std::io::{self, Read, Write};
 
         let mut out = vec![];
@@ -966,6 +971,18 @@ mod tests {
             .into_iter(&arena)
             .collect::<Result<Vec<_>, _>>()
             .expect("Parsing failed");
+
+        let length = {
+            let mut out_str = String::with_capacity(1024);
+
+            for i in &massive {
+                let _ = writeln!(&mut out_str, "{}", i);
+            }
+
+            out_str.len()
+        };
+
+        b.bytes = length as u64;
 
         let mut out = io::sink();
 
