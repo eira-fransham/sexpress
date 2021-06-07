@@ -7,9 +7,6 @@ authors = ["Vurich <jackefransham@gmail.com>"]
 toolshed = { git = "https://github.com/Vurich/toolshed.git", branch = "set-tools" }
 smallvec = "*"
 
-[dev-dependencies]
-memmap = "*"
-
 [features]
 default = []
 debug-output = []

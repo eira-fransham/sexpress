@@ -415,7 +415,7 @@ fn parse_inner<'a, 'mu, I: FromStr + Copy, F: FromStr + Copy>(
                 use std::ptr;
 
                 debug!();
-                let mut without_backslashes = arena.require(bytes.len());
+                let without_backslashes = arena.require(bytes.len());
 
                 let mut last_loc = 0;
                 let mut out_loc = 0;
